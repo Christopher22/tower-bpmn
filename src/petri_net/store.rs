@@ -14,11 +14,20 @@ impl<T> Id<T> {
             _marker: std::marker::PhantomData,
         }
     }
+
+    /// Create a new Id for testing purposes.
+    #[cfg(test)]
+    pub const fn new_test(id: usize) -> Self {
+        Id {
+            id,
+            _marker: std::marker::PhantomData,
+        }
+    }
 }
 
 impl<T> Clone for Id<T> {
     fn clone(&self) -> Self {
-        Self::new(self.id)
+        *self
     }
 }
 
@@ -46,7 +55,7 @@ impl<T> std::hash::Hash for Id<T> {
 
 impl<T> PartialOrd for Id<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.id.partial_cmp(&other.id)
+        Some(self.cmp(other))
     }
 }
 

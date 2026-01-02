@@ -1,6 +1,10 @@
 mod store;
 
-use std::{collections::BTreeMap, ops::Index};
+use std::{
+    collections::BTreeMap,
+    num::NonZero,
+    ops::{Index, IndexMut},
+};
 
 pub use self::store::{Id, Store};
 
@@ -34,9 +38,9 @@ pub struct Transition {
 
 impl Transition {
     /// Check if the transition can fire given the marking.
-    pub fn can_fire(&self, marking: &Marking) -> bool {
+    pub fn is_enabled(&self, marking: &Marking) -> bool {
         for arc in &self.input {
-            if marking[arc.target] < arc.tokens {
+            if marking[arc.target] < arc.weights {
                 return false;
             }
         }
@@ -47,7 +51,7 @@ impl Transition {
 #[derive(Debug, Clone)]
 struct Arc<T> {
     pub target: Id<T>,
-    pub tokens: usize,
+    pub weights: usize,
 }
 
 /// The marking of a Petri net, representing the distribution of tokens across places.
@@ -55,15 +59,41 @@ struct Arc<T> {
 pub struct Marking(BTreeMap<Id<Place>, usize>);
 
 impl Marking {
-    /// Update the marking by firing the given transition, iff it can fire.
-    pub fn update(&mut self, transition: &Transition) -> bool {
-        if !transition.can_fire(self) {
+    /// Create an empty marking with no tokens.
+    pub const fn empty() -> Self {
+        Marking(BTreeMap::new())
+    }
+
+    /// Update the marking by firing the given transition, iff it is enabled.
+    pub fn update_input(&mut self, transition: &Transition) -> bool {
+        if !transition.is_enabled(self) {
             return false;
         }
         for arc in &transition.input {
             self.0
                 .entry(arc.target)
-                .and_modify(|e| *e = e.saturating_sub(arc.tokens));
+                .and_modify(|e| *e = e.saturating_sub(arc.weights));
+        }
+        true
+    }
+
+    /// Update the marking by adding tokens from the given transition.
+    pub fn update_output(&mut self, transition: &Transition) {
+        for arc in &transition.output {
+            self.0
+                .entry(arc.target)
+                .and_modify(|e| *e += arc.weights)
+                .or_insert(arc.weights);
+        }
+    }
+
+    /// Check if this marking is included in another marking.
+    pub fn is_included_in(&self, other: &Marking) -> bool {
+        for (place_id, &tokens) in &self.0 {
+            let other_tokens = other[*place_id];
+            if tokens > other_tokens {
+                return false;
+            }
         }
         true
     }
@@ -78,8 +108,14 @@ impl Index<Id<Place>> for Marking {
     }
 }
 
+impl IndexMut<Id<Place>> for Marking {
+    fn index_mut(&mut self, index: Id<Place>) -> &mut Self::Output {
+        self.0.entry(index).or_insert(0)
+    }
+}
+
 /// A Petri net.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PetriNet {
     places: Store<Place>,
     transitions: Store<Transition>,
@@ -101,14 +137,19 @@ impl PetriNet {
     }
 
     /// Connect a place to a transition with the given number of tokens.
-    pub fn connect_place(&mut self, from: Id<Place>, to: Id<Transition>, tokens: usize) -> bool {
+    pub fn connect_place(
+        &mut self,
+        from: Id<Place>,
+        to: Id<Transition>,
+        weights: NonZero<usize>,
+    ) -> bool {
         let transition = &mut self.transitions[to];
         if transition.input.iter().any(|arc| arc.target == from) {
             return false;
         }
         transition.input.push(Arc {
             target: from,
-            tokens,
+            weights: weights.get(),
         });
         true
     }
@@ -118,13 +159,16 @@ impl PetriNet {
         &mut self,
         from: Id<Transition>,
         to: Id<Place>,
-        tokens: usize,
+        weights: NonZero<usize>,
     ) -> bool {
         let transition = &mut self.transitions[from];
         if transition.output.iter().any(|arc| arc.target == to) {
             return false;
         }
-        transition.output.push(Arc { target: to, tokens });
+        transition.output.push(Arc {
+            target: to,
+            weights: weights.get(),
+        });
         true
     }
 
@@ -143,14 +187,15 @@ impl PetriNet {
                 .collect(),
         )
     }
-}
 
-impl Default for PetriNet {
-    fn default() -> Self {
-        PetriNet {
-            places: Store::default(),
-            transitions: Store::default(),
-        }
+    /// Iterate over the places in the Petri net.
+    pub fn places(&self) -> impl Iterator<Item = (Id<Place>, &Place)> {
+        self.places.iter()
+    }
+
+    /// Iterate over the transitions in the Petri net.
+    pub fn transitions(&self) -> impl Iterator<Item = (Id<Transition>, &Transition)> {
+        self.transitions.iter()
     }
 }
 
@@ -179,7 +224,22 @@ mod tests {
         let t1 = petri_net.add_transition(|| {
             println!("Transition fired");
         });
-        assert!(petri_net.connect_place(p1, t1, 2));
-        assert!(petri_net.connect_transition(t1, p2, 1));
+        assert!(petri_net.connect_place(p1, t1, NonZero::new(2).unwrap()));
+        assert!(petri_net.connect_transition(t1, p2, NonZero::new(1).unwrap()));
+    }
+
+    #[test]
+    fn test_marking_is_included() {
+        let mut marking1 = Marking::empty();
+        marking1[Id::new_test(0)] = 3;
+        marking1[Id::new_test(1)] = 5;
+
+        let mut marking2 = Marking::empty();
+        marking2[Id::new_test(0)] = 4;
+        marking2[Id::new_test(1)] = 5;
+        marking2[Id::new_test(2)] = 2;
+
+        assert!(marking1.is_included_in(&marking2));
+        assert!(!marking2.is_included_in(&marking1));
     }
 }
