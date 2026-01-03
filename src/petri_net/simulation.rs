@@ -4,6 +4,10 @@ use futures::{FutureExt, StreamExt, task::Spawn};
 
 use super::{EnabledTransitions, Entry, Id, Marking, PetriNet, Transition};
 
+pub trait Callable: 'static + Clone + Send + Fn() {}
+
+impl<T> Callable for T where T: 'static + Clone + Send + Fn() {}
+
 /// A backend executor for running tasks.
 pub trait Executor {
     /// The handle type for spawned tasks.
@@ -35,19 +39,19 @@ impl Executor for futures::executor::LocalSpawner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct TaskId(usize);
 
-struct Update {
+struct Update<A> {
     task_id: TaskId,
-    transition_id: Id<Transition>,
+    transition_id: Id<Transition<A>>,
 }
 
-struct Tasks<E: Executor> {
+struct Tasks<E: Executor, A> {
     tasks: HashMap<TaskId, E::TaskHandle>,
-    sender: futures::channel::mpsc::UnboundedSender<Update>,
+    sender: futures::channel::mpsc::UnboundedSender<Update<A>>,
     executor: E,
 }
 
-impl<E: Executor> Tasks<E> {
-    fn new(executor: E, sender: futures::channel::mpsc::UnboundedSender<Update>) -> Self {
+impl<E: Executor, A> Tasks<E, A> {
+    fn new(executor: E, sender: futures::channel::mpsc::UnboundedSender<Update<A>>) -> Self {
         Tasks {
             tasks: HashMap::new(),
             sender,
@@ -55,10 +59,22 @@ impl<E: Executor> Tasks<E> {
         }
     }
 
-    fn spawn(&mut self, transition: Entry<'_, Transition>) -> TaskId {
+    async fn remove(&mut self, task_id: &TaskId) {
+        if let Some(value) = self.tasks.remove(task_id) {
+            self.executor.stop(value).await;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+}
+
+impl<E: Executor, A: Callable> Tasks<E, A> {
+    fn spawn(&mut self, transition: Entry<'_, Transition<A>>) -> TaskId {
         let task_id = TaskId(self.tasks.len());
         let sender = self.sender.clone();
-        let callback = transition.item.action;
+        let callback = transition.item.action.clone();
         let transition_id = transition.id;
         self.tasks.insert(
             task_id,
@@ -77,22 +93,12 @@ impl<E: Executor> Tasks<E> {
         );
         task_id
     }
-
-    async fn remove(&mut self, task_id: &TaskId) {
-        if let Some(value) = self.tasks.remove(task_id) {
-            self.executor.stop(value).await;
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.tasks.is_empty()
-    }
 }
 
 /// The Strategy for resolving competing transitions.
 pub trait CompetingStrategy {
     /// Select one transition from the competing ones. Transition is guaranteed to have at least one element.
-    fn select<'a, T: Clone>(&self, transitions: Vec<Entry<'a, T>>) -> Entry<'a, T>;
+    fn select<'a, T>(&self, transitions: Vec<Entry<'a, T>>) -> Entry<'a, T>;
 }
 
 /// A strategy that selects a random transition among competing ones.
@@ -100,23 +106,23 @@ pub trait CompetingStrategy {
 pub struct FirstCompetingStrategy;
 
 impl CompetingStrategy for FirstCompetingStrategy {
-    fn select<'a, T: Clone>(&self, mut transitions: Vec<Entry<'a, T>>) -> Entry<'a, T> {
+    fn select<'a, T>(&self, mut transitions: Vec<Entry<'a, T>>) -> Entry<'a, T> {
         transitions.pop().unwrap()
     }
 }
 
 /// A run of a Petri net simulation.
-pub struct Simulation<E: Executor, C: CompetingStrategy> {
-    petri_net: std::sync::Arc<PetriNet>,
+pub struct Simulation<E: Executor, C: CompetingStrategy, A> {
+    petri_net: std::sync::Arc<PetriNet<A>>,
     marking: Marking,
-    receiver: futures::channel::mpsc::UnboundedReceiver<Update>,
-    tasks: Tasks<E>,
+    receiver: futures::channel::mpsc::UnboundedReceiver<Update<A>>,
+    tasks: Tasks<E, A>,
     competing_strategy: C,
 }
 
-impl<E: Executor, C: CompetingStrategy> Simulation<E, C> {
+impl<E: Executor, C: CompetingStrategy, A> Simulation<E, C, A> {
     /// Prepare a new simulation for the given Petri net.
-    pub fn new(executor: E, petri_net: std::sync::Arc<PetriNet>, competing_strategy: C) -> Self {
+    pub fn new(executor: E, petri_net: std::sync::Arc<PetriNet<A>>, competing_strategy: C) -> Self {
         let (sender, receiver) = futures::channel::mpsc::unbounded();
         let marking = petri_net.initial_marking();
         Simulation {
@@ -127,7 +133,9 @@ impl<E: Executor, C: CompetingStrategy> Simulation<E, C> {
             competing_strategy,
         }
     }
+}
 
+impl<E: Executor, C: CompetingStrategy, A: Callable> Simulation<E, C, A> {
     /// Run the simulation until completion.
     pub async fn run(mut self) -> Marking {
         for enabled_transaction in
@@ -139,7 +147,7 @@ impl<E: Executor, C: CompetingStrategy> Simulation<E, C> {
                     self.competing_strategy.select(transitions)
                 }
             };
-            if self.marking.update_input(&transition.item) {
+            if self.marking.update_input(transition.item) {
                 self.tasks.spawn(transition);
             }
         }
@@ -165,7 +173,7 @@ impl<E: Executor, C: CompetingStrategy> Simulation<E, C> {
                         self.competing_strategy.select(transitions)
                     }
                 };
-                if self.marking.update_input(&transition.item) {
+                if self.marking.update_input(transition.item) {
                     self.tasks.spawn(transition);
                 }
             }
@@ -182,7 +190,7 @@ impl<E: Executor, C: CompetingStrategy> Simulation<E, C> {
 
 #[cfg(test)]
 mod tests {
-    use crate::Place;
+    use crate::{DEFAULT_WEIGHT, Place};
 
     use super::*;
 
@@ -214,7 +222,7 @@ mod tests {
     fn test_concurrent() {
         let (start1, start2, end);
         let petri_net = std::sync::Arc::new({
-            let mut petri_net = PetriNet::default();
+            let mut petri_net = PetriNet::<fn()>::default();
             start1 = petri_net.add_place(Place::new("Start 1", 1));
             start2 = petri_net.add_place(Place::new("Start 2", 1));
             end = petri_net.add_place(Place::new("End", 0));
@@ -222,10 +230,10 @@ mod tests {
             let t1 = petri_net.add_transition(|| println!("Transition 1 fired"));
             let t2 = petri_net.add_transition(|| println!("Transition 2 fired"));
 
-            assert!(petri_net.connect_place(start1, t1, PetriNet::DEFAULT_WEIGHT));
-            assert!(petri_net.connect_place(start2, t2, PetriNet::DEFAULT_WEIGHT));
-            assert!(petri_net.connect_transition(t1, end, PetriNet::DEFAULT_WEIGHT));
-            assert!(petri_net.connect_transition(t2, end, PetriNet::DEFAULT_WEIGHT));
+            assert!(petri_net.connect_place(start1, t1, DEFAULT_WEIGHT));
+            assert!(petri_net.connect_place(start2, t2, DEFAULT_WEIGHT));
+            assert!(petri_net.connect_transition(t1, end, DEFAULT_WEIGHT));
+            assert!(petri_net.connect_transition(t2, end, DEFAULT_WEIGHT));
             petri_net
         });
         assert_eq!(petri_net.initial_marking()[end], 0);
@@ -242,15 +250,15 @@ mod tests {
     fn test_competing() {
         let (start, end);
         let petri_net = std::sync::Arc::new({
-            let mut petri_net = PetriNet::default();
+            let mut petri_net = PetriNet::<fn()>::default();
             (start, _, end) = petri_net.add_connected_places(
                 Place::new("Start", 1),
                 Place::new("End", 0),
                 || println!("Transition 1 fired"),
             );
             let alternative = petri_net.add_transition(|| println!("Transition 2 fired"));
-            assert!(petri_net.connect_place(start, alternative, PetriNet::DEFAULT_WEIGHT));
-            assert!(petri_net.connect_transition(alternative, end, PetriNet::DEFAULT_WEIGHT));
+            assert!(petri_net.connect_place(start, alternative, DEFAULT_WEIGHT));
+            assert!(petri_net.connect_transition(alternative, end, DEFAULT_WEIGHT));
             petri_net
         });
 

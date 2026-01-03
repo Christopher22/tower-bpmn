@@ -1,7 +1,4 @@
-use std::{
-    borrow::Cow,
-    ops::{Index, IndexMut},
-};
+use std::ops::{Index, IndexMut};
 
 /// A unique identifier for an item usable as an index.
 #[derive(Debug)]
@@ -69,31 +66,21 @@ impl<T> Ord for Id<T> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Entry<'a, T: Clone> {
+pub struct Entry<'a, T> {
     pub id: Id<T>,
-    pub item: Cow<'a, T>,
+    pub item: &'a T,
 }
 
-impl<'a, T: Clone> Entry<'a, T> {
-    pub const fn owned(id: Id<T>, item: T) -> Self {
-        Entry {
-            id,
-            item: Cow::Owned(item),
-        }
-    }
-
-    pub const fn borrowed(id: Id<T>, item: &'a T) -> Self {
-        Entry {
-            id,
-            item: Cow::Borrowed(item),
-        }
+impl<'a, T> Entry<'a, T> {
+    pub const fn new(id: Id<T>, item: &'a T) -> Self {
+        Entry { id, item }
     }
 }
 
-impl<T: Clone> std::ops::Deref for Entry<'_, T> {
+impl<T> std::ops::Deref for Entry<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        &self.item
+        self.item
     }
 }
 
@@ -106,14 +93,12 @@ impl<T> Store<T> {
         self.0.push(item);
         Id::new(id)
     }
-}
 
-impl<T: Clone> Store<T> {
     pub fn iter(&self) -> impl Iterator<Item = Entry<'_, T>> {
         self.0
             .iter()
             .enumerate()
-            .map(|(i, item)| Entry::borrowed(Id::new(i), item))
+            .map(|(i, item)| Entry::new(Id::new(i), item))
     }
 }
 
