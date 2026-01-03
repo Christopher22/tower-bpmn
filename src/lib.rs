@@ -5,4 +5,7 @@
 
 mod petri_net;
 
-pub use petri_net::{Id, Marking, PetriNet, Place, Transition};
+pub use petri_net::{
+    CompetingStrategy, Executor, FirstCompetingStrategy, Id, Marking, PetriNet, Place, Simulation,
+    Transition,
+};
