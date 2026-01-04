@@ -6,6 +6,6 @@
 mod petri_net;
 
 pub use petri_net::{
-    CompetingStrategy, DEFAULT_WEIGHT, Executor, FirstCompetingStrategy, Id, Marking, PetriNet,
-    Place, Simulation, Transition,
+    Color, CompetingStrategy, Executor, FirstCompetingStrategy, Id, Marking, PetriNet, Place,
+    Simulation, Transition, UsizeWeight,
 };

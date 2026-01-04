@@ -4,7 +4,7 @@ use std::ops::{Index, IndexMut};
 #[derive(Debug)]
 pub struct Id<T> {
     id: usize,
-    _marker: std::marker::PhantomData<T>,
+    _marker: std::marker::PhantomData<fn() -> T>, // This makes Id<T> "Send"
 }
 
 impl<T> Id<T> {

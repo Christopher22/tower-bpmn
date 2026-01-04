@@ -1,27 +1,28 @@
+mod color;
 mod simulation;
 mod store;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    num::NonZero,
     ops::{Index, IndexMut},
 };
 
+pub use self::color::{Color, UsizeWeight};
 pub use self::simulation::{CompetingStrategy, Executor, FirstCompetingStrategy, Simulation};
 pub use self::store::{Entry, Id, Store};
 
 /// A place in a Petri net.
 #[derive(Debug, Clone)]
-pub struct Place {
+pub struct Place<C: Color> {
     /// The name of the place.
     pub name: String,
     /// The initial number of tokens in the place.
-    pub initial_tokens: usize,
+    pub initial_tokens: C,
 }
 
-impl Place {
+impl<C: Color> Place<C> {
     /// Create a new place with the given name and initial tokens.
-    pub fn new(name: impl Into<String>, initial_tokens: usize) -> Self {
+    pub fn new(name: impl Into<String>, initial_tokens: C) -> Self {
         Place {
             name: name.into(),
             initial_tokens,
@@ -30,110 +31,68 @@ impl Place {
 }
 
 /// A transition in a Petri net.
-#[derive(Debug)]
-pub struct Transition<A> {
+pub struct Transition<A, C: Color> {
     /// The action to perform when the transition fires.
     pub action: A,
-    input: Vec<Arc<Place>>,
-    output: Vec<Arc<Place>>,
+    input: Vec<Arc<Place<C>, C>>,
+    output: Vec<Arc<Place<C>, C>>,
 }
 
-impl<A> Transition<A> {
-    /// Check if the transition can fire given the marking.
-    pub fn is_enabled(&self, marking: &Marking) -> bool {
-        for arc in &self.input {
-            if marking[arc.target] < arc.weights {
-                return false;
-            }
-        }
-        true
+impl<A, C: Color> std::fmt::Debug for Transition<A, C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Transition").finish_non_exhaustive()
     }
 }
 
 #[derive(Debug, Clone)]
-struct Arc<T> {
+struct Arc<T, C: Color> {
     pub target: Id<T>,
-    pub weights: usize,
+    pub weights: C::Weight,
 }
 
 /// The marking of a Petri net, representing the distribution of tokens across places.
 #[derive(Debug, Clone)]
-pub struct Marking(BTreeMap<Id<Place>, usize>);
+pub struct Marking<C: Color>(BTreeMap<Id<Place<C>>, C>);
 
-impl Marking {
+impl<C: Color> Marking<C> {
     /// Create an empty marking with no tokens.
     pub const fn empty() -> Self {
         Marking(BTreeMap::new())
     }
+}
 
-    /// Update the marking by firing the given transition, iff it is enabled.
-    pub fn update_input<A>(&mut self, transition: &Transition<A>) -> bool {
-        if !transition.is_enabled(self) {
-            return false;
-        }
-        for arc in &transition.input {
-            self.0
-                .entry(arc.target)
-                .and_modify(|e| *e = e.saturating_sub(arc.weights));
-        }
-        true
-    }
+impl<C: Color> Index<Id<Place<C>>> for Marking<C> {
+    type Output = C;
 
-    /// Update the marking by adding tokens from the given transition.
-    pub fn update_output<A>(&mut self, transition: &Transition<A>) {
-        for arc in &transition.output {
-            self.0
-                .entry(arc.target)
-                .and_modify(|e| *e += arc.weights)
-                .or_insert(arc.weights);
-        }
-    }
-
-    /// Check if this marking is included in another marking.
-    pub fn is_included_in(&self, other: &Marking) -> bool {
-        for (place_id, &tokens) in &self.0 {
-            let other_tokens = other[*place_id];
-            if tokens > other_tokens {
-                return false;
-            }
-        }
-        true
+    fn index(&self, index: Id<Place<C>>) -> &Self::Output {
+        self.0.get(&index).unwrap_or(C::DEFAULT_REF)
     }
 }
 
-impl Index<Id<Place>> for Marking {
-    type Output = usize;
-
-    fn index(&self, index: Id<Place>) -> &Self::Output {
-        const DEFAULT: usize = 0;
-        self.0.get(&index).unwrap_or(&DEFAULT)
-    }
-}
-
-impl IndexMut<Id<Place>> for Marking {
-    fn index_mut(&mut self, index: Id<Place>) -> &mut Self::Output {
-        self.0.entry(index).or_insert(0)
+impl<C: Color> IndexMut<Id<Place<C>>> for Marking<C> {
+    fn index_mut(&mut self, index: Id<Place<C>>) -> &mut Self::Output {
+        self.0.entry(index).or_default()
     }
 }
 
 /// A Petri net.
 #[derive(Debug)]
-pub struct PetriNet<A> {
-    places: Store<Place>,
-    transitions: Store<Transition<A>>,
+pub struct PetriNet<A, C: Color> {
+    places: Store<Place<C>>,
+    transitions: Store<Transition<A, C>>,
 }
 
-/// The default weight for arcs.
-pub const DEFAULT_WEIGHT: NonZero<usize> = NonZero::new(1).unwrap();
+/// A tuple representing two connected places with a transition in between.
+pub type ConnectedPlaces<A, C> = (Id<Place<C>>, Id<Transition<A, C>>, Id<Place<C>>);
 
-impl<A> PetriNet<A> {
+impl<A, C: Color> PetriNet<A, C> {
     /// Add a place to the Petri net.
-    pub fn add_place(&mut self, place: Place) -> Id<Place> {
+    pub fn add_place(&mut self, place: Place<C>) -> Id<Place<C>> {
         self.places.push(place)
     }
 
     /// Add a transition to the Petri net.
-    pub fn add_transition(&mut self, action: A) -> Id<Transition<A>> {
+    pub fn add_transition(&mut self, action: A) -> Id<Transition<A, C>> {
         self.transitions.push(Transition {
             input: Vec::new(),
             output: Vec::new(),
@@ -141,27 +100,27 @@ impl<A> PetriNet<A> {
         })
     }
 
-    /// Convenience function to add two connected places with a transition in between, all with weight of 1.
+    /// Convenience function to add two connected places with a transition in between, all with default weights.
     pub fn add_connected_places(
         &mut self,
-        p1: Place,
-        p2: Place,
+        p1: Place<C>,
+        p2: Place<C>,
         action: A,
-    ) -> (Id<Place>, Id<Transition<A>>, Id<Place>) {
+    ) -> ConnectedPlaces<A, C> {
         let place_from = self.add_place(p1);
         let place_to = self.add_place(p2);
         let transition = self.add_transition(action);
-        self.connect_place(place_from, transition, DEFAULT_WEIGHT);
-        self.connect_transition(transition, place_to, DEFAULT_WEIGHT);
+        self.connect_place(place_from, transition, C::Weight::default());
+        self.connect_transition(transition, place_to, C::Weight::default());
         (place_from, transition, place_to)
     }
 
     /// Connect a place to a transition with the given number of tokens.
     pub fn connect_place(
         &mut self,
-        from: Id<Place>,
-        to: Id<Transition<A>>,
-        weights: NonZero<usize>,
+        from: Id<Place<C>>,
+        to: Id<Transition<A, C>>,
+        weights: C::Weight,
     ) -> bool {
         let transition = &mut self.transitions[to];
         if transition.input.iter().any(|arc| arc.target == from) {
@@ -169,7 +128,7 @@ impl<A> PetriNet<A> {
         }
         transition.input.push(Arc {
             target: from,
-            weights: weights.get(),
+            weights,
         });
         true
     }
@@ -177,9 +136,9 @@ impl<A> PetriNet<A> {
     /// Connect a transition to a place with the given number of tokens.
     pub fn connect_transition(
         &mut self,
-        from: Id<Transition<A>>,
-        to: Id<Place>,
-        weights: NonZero<usize>,
+        from: Id<Transition<A, C>>,
+        to: Id<Place<C>>,
+        weights: C::Weight,
     ) -> bool {
         let transition = &mut self.transitions[from];
         if transition.output.iter().any(|arc| arc.target == to) {
@@ -187,19 +146,19 @@ impl<A> PetriNet<A> {
         }
         transition.output.push(Arc {
             target: to,
-            weights: weights.get(),
+            weights,
         });
         true
     }
 
     /// Get the initial marking of the Petri net.
-    pub fn initial_marking(&self) -> Marking {
+    pub fn initial_marking(&self) -> Marking<C> {
         Marking(
             self.places
                 .iter()
                 .filter_map(|entry| {
-                    if entry.item.initial_tokens > 0 {
-                        Some((entry.id, entry.item.initial_tokens))
+                    if &entry.item.initial_tokens != C::DEFAULT_REF {
+                        Some((entry.id, entry.item.initial_tokens.clone()))
                     } else {
                         None
                     }
@@ -209,17 +168,17 @@ impl<A> PetriNet<A> {
     }
 
     /// Iterate over the places in the Petri net.
-    pub fn places(&self) -> impl Iterator<Item = Entry<'_, Place>> {
+    pub fn places(&self) -> impl Iterator<Item = Entry<'_, Place<C>>> {
         self.places.iter()
     }
 
     /// Iterate over the transitions in the Petri net.
-    pub fn transitions(&self) -> impl Iterator<Item = Entry<'_, Transition<A>>> {
+    pub fn transitions(&self) -> impl Iterator<Item = Entry<'_, Transition<A, C>>> {
         self.transitions.iter()
     }
 }
 
-impl<A> Default for PetriNet<A> {
+impl<A, C: Color> Default for PetriNet<A, C> {
     fn default() -> Self {
         PetriNet {
             places: Store::default(),
@@ -228,37 +187,37 @@ impl<A> Default for PetriNet<A> {
     }
 }
 
-impl<A> Index<Id<Place>> for PetriNet<A> {
-    type Output = Place;
+impl<A, C: Color> Index<Id<Place<C>>> for PetriNet<A, C> {
+    type Output = Place<C>;
 
-    fn index(&self, index: Id<Place>) -> &Self::Output {
+    fn index(&self, index: Id<Place<C>>) -> &Self::Output {
         &self.places[index]
     }
 }
 
-impl<A> Index<Id<Transition<A>>> for PetriNet<A> {
-    type Output = Transition<A>;
+impl<A, C: Color> Index<Id<Transition<A, C>>> for PetriNet<A, C> {
+    type Output = Transition<A, C>;
 
-    fn index(&self, index: Id<Transition<A>>) -> &Self::Output {
+    fn index(&self, index: Id<Transition<A, C>>) -> &Self::Output {
         &self.transitions[index]
     }
 }
 
-pub enum EnabledTransitions<'a, A> {
-    Independent(Entry<'a, Transition<A>>),
-    Competing(Vec<Entry<'a, Transition<A>>>),
+pub enum EnabledTransitions<'a, A, C: Color> {
+    Independent(Entry<'a, Transition<A, C>>),
+    Competing(Vec<Entry<'a, Transition<A, C>>>),
 }
 
-impl<A> EnabledTransitions<'_, A> {
+impl<A, C: Color> EnabledTransitions<'_, A, C> {
     pub fn find_all<'a>(
-        petri_net: &'a PetriNet<A>,
-        marking: Marking,
-    ) -> impl ExactSizeIterator<Item = EnabledTransitions<'a, A>> {
+        petri_net: &'a PetriNet<A, C>,
+        marking: Marking<C>,
+    ) -> impl ExactSizeIterator<Item = EnabledTransitions<'a, A, C>> {
         let mut transitions = std::collections::HashMap::new();
 
         for transition in petri_net.transitions() {
-            if transition.is_enabled(&marking) {
-                let inputs: BTreeSet<Id<Place>> =
+            if C::is_transition_enabled(&transition, &marking) {
+                let inputs: BTreeSet<Id<Place<C>>> =
                     transition.input.iter().map(|arc| arc.target).collect();
                 transitions
                     .entry(inputs)
@@ -283,7 +242,7 @@ mod tests {
 
     #[test]
     fn test_initial_marking() {
-        let mut petri_net = PetriNet::<fn()>::default();
+        let mut petri_net = PetriNet::<fn(), usize>::default();
         let p1 = petri_net.add_place(Place::new("Place 1", 2));
         let p2 = petri_net.add_place(Place::new("Place 2", 0));
         let p3 = petri_net.add_place(Place::new("Place 3", 5));
@@ -305,32 +264,16 @@ mod tests {
 
         let trans_s_p1 = &petri_net[trans_s_p1];
         let mut marking = petri_net.initial_marking();
-        assert!(trans_s_p1.is_enabled(&marking));
-        assert!(marking.update_input(trans_s_p1));
-        assert!(!trans_s_p1.is_enabled(&marking));
-        marking.update_output(trans_s_p1);
-        assert!(!trans_s_p1.is_enabled(&marking));
-    }
-
-    #[test]
-    fn test_marking_is_included() {
-        let mut marking1 = Marking::empty();
-        marking1[Id::new_test(0)] = 3;
-        marking1[Id::new_test(1)] = 5;
-
-        let mut marking2 = Marking::empty();
-        marking2[Id::new_test(0)] = 4;
-        marking2[Id::new_test(1)] = 5;
-        marking2[Id::new_test(2)] = 2;
-
-        assert!(marking1.is_included_in(&marking2));
-        assert!(!marking2.is_included_in(&marking1));
+        assert!(usize::is_transition_enabled(trans_s_p1, &marking));
+        assert!(usize::update_input(trans_s_p1, &mut marking).is_some());
+        assert!(!usize::is_transition_enabled(trans_s_p1, &marking));
+        usize::update_output(trans_s_p1, &mut marking, ());
+        assert!(!usize::is_transition_enabled(trans_s_p1, &marking));
     }
 
     #[test]
     fn test_enabled_transitions() {
-        let mut petri_net = PetriNet::<fn()>::default();
-
+        let mut petri_net = PetriNet::<fn(), usize>::default();
         let (_, trans_s_p1, p1) =
             petri_net.add_connected_places(Place::new("Start", 1), Place::new("P1", 1), || {});
         let p2 = petri_net.add_place(Place::new("P2", 0));
@@ -338,12 +281,12 @@ mod tests {
             petri_net.add_connected_places(Place::new("P3", 0), Place::new("End", 0), || {});
 
         let trans_p1_p2 = petri_net.add_transition(|| {});
-        assert!(petri_net.connect_place(p1, trans_p1_p2, DEFAULT_WEIGHT));
-        assert!(petri_net.connect_transition(trans_p1_p2, p2, DEFAULT_WEIGHT));
+        assert!(petri_net.connect_place(p1, trans_p1_p2, UsizeWeight::DEFAULT));
+        assert!(petri_net.connect_transition(trans_p1_p2, p2, UsizeWeight::DEFAULT));
 
         let trans_p1_p3 = petri_net.add_transition(|| {});
-        assert!(petri_net.connect_place(p1, trans_p1_p3, DEFAULT_WEIGHT));
-        assert!(petri_net.connect_transition(trans_p1_p3, p3, DEFAULT_WEIGHT));
+        assert!(petri_net.connect_place(p1, trans_p1_p3, UsizeWeight::DEFAULT));
+        assert!(petri_net.connect_transition(trans_p1_p3, p3, UsizeWeight::DEFAULT));
 
         let enabled_transitions: Vec<_> =
             EnabledTransitions::find_all(&petri_net, petri_net.initial_marking()).collect();
