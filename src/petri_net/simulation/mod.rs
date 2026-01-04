@@ -1,12 +1,29 @@
-use std::{collections::HashMap, hash::Hash};
+mod tasks;
 
 use futures::{FutureExt, StreamExt, task::Spawn};
 
+use self::tasks::{Tasks, Update};
 use super::{Color, EnabledTransitions, Entry, Id, Marking, PetriNet, Transition};
 
-pub trait Callable: 'static + Clone + Send + Fn() {}
+/// A action stored for a transition which could be executed asynchronously.
+pub trait Callable<S: 'static + Send>: 'static {
+    /// Create a future that executes the action with the given state.
+    fn create_future(&self, state: S) -> impl std::future::Future<Output = S> + 'static + Send;
+}
 
-impl<T> Callable for T where T: 'static + Clone + Send + Fn() {}
+impl Callable<()> for fn() {
+    fn create_future(&self, _state: ()) -> impl std::future::Future<Output = ()> + 'static + Send {
+        let func = *self;
+        async move { func() }
+    }
+}
+
+impl<S: 'static + Send> Callable<S> for fn(S) -> S {
+    fn create_future(&self, state: S) -> impl std::future::Future<Output = S> + 'static + Send {
+        let func = *self;
+        async move { func(state) }
+    }
+}
 
 /// A backend executor for running tasks.
 pub trait Executor {
@@ -34,67 +51,6 @@ impl Executor for futures::executor::LocalSpawner {
     }
 
     async fn stop(&self, _task: Self::TaskHandle) {}
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct TaskId(usize);
-
-struct Update<A, C: Color> {
-    task_id: TaskId,
-    transition_id: Id<Transition<A, C>>,
-    new_state: C::State,
-}
-
-struct Tasks<E: Executor, A, C: Color> {
-    tasks: HashMap<TaskId, E::TaskHandle>,
-    sender: futures::channel::mpsc::UnboundedSender<Update<A, C>>,
-    executor: E,
-}
-
-impl<E: Executor, A, C: Color> Tasks<E, A, C> {
-    fn new(executor: E, sender: futures::channel::mpsc::UnboundedSender<Update<A, C>>) -> Self {
-        Tasks {
-            tasks: HashMap::new(),
-            sender,
-            executor,
-        }
-    }
-
-    async fn remove(&mut self, task_id: &TaskId) {
-        if let Some(value) = self.tasks.remove(task_id) {
-            self.executor.stop(value).await;
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.tasks.is_empty()
-    }
-}
-
-impl<E: Executor, A: Callable, C: Color> Tasks<E, A, C> {
-    fn spawn(&mut self, transition: Entry<'_, Transition<A, C>>, state: C::State) -> TaskId {
-        let task_id = TaskId(self.tasks.len());
-        let sender = self.sender.clone();
-        let callback = transition.item.action.clone();
-        let transition_id = transition.id;
-        self.tasks.insert(
-            task_id,
-            self.executor.spawn_task(async move {
-                (callback)();
-                if sender
-                    .unbounded_send(Update {
-                        task_id,
-                        transition_id,
-                        new_state: state,
-                    })
-                    .is_err()
-                {
-                    // The receiver has been dropped
-                }
-            }),
-        );
-        task_id
-    }
 }
 
 /// The Strategy for resolving competing transitions.
@@ -141,9 +97,9 @@ impl<E: Executor, S: CompetingStrategy, A, C: Color> Simulation<E, S, A, C> {
     }
 }
 
-impl<E: Executor, S: CompetingStrategy, A: Callable, C: Color> Simulation<E, S, A, C> {
-    /// Run the simulation until completion.
-    pub async fn run(mut self) -> Marking<C> {
+impl<E: Executor, S: CompetingStrategy, A: Callable<C::State>, C: Color> Simulation<E, S, A, C> {
+    /// Run all enabled transitions and return whether there are no more tasks running.
+    fn run_all_transactions(&mut self) -> bool {
         for enabled_transaction in
             EnabledTransitions::find_all(self.petri_net.as_ref(), self.marking.clone())
         {
@@ -158,38 +114,23 @@ impl<E: Executor, S: CompetingStrategy, A: Callable, C: Color> Simulation<E, S, 
                 self.tasks.spawn(transition, state);
             }
         }
-        if self.tasks.is_empty() {
+        self.tasks.is_empty()
+    }
+
+    /// Run the simulation until completion.
+    pub async fn run(mut self) -> Marking<C> {
+        if self.run_all_transactions() {
             return self.marking;
         }
 
         while let Some(update) = self.receiver.next().await {
-            // Remove the completed task
-            self.tasks.remove(&update.task_id).await;
-
             // Update the marking
-            C::update_output(
-                &self.petri_net[update.transition_id],
-                &mut self.marking,
-                update.new_state,
-            );
-
-            // Spawn new tasks for enabled transitions
-            for enabled_transaction in
-                EnabledTransitions::find_all(self.petri_net.as_ref(), self.marking.clone())
-            {
-                let transition = match enabled_transaction {
-                    EnabledTransitions::Independent(transition) => transition,
-                    EnabledTransitions::Competing(transitions) => {
-                        self.competing_strategy.select(transitions)
-                    }
-                };
-                if let Some(state) = C::update_input(&transition, &mut self.marking) {
-                    self.tasks.spawn(transition, state);
-                }
-            }
+            update
+                .finish(&mut self.tasks, &self.petri_net, &mut self.marking)
+                .await;
 
             // Exit if there are no more tasks running
-            if self.tasks.is_empty() {
+            if self.run_all_transactions() {
                 break;
             }
         }
@@ -208,7 +149,7 @@ mod tests {
     fn test_simple() {
         let (start_id, end_id);
         let petri_net = std::sync::Arc::new({
-            let mut petri_net = PetriNet::default();
+            let mut petri_net = PetriNet::<fn(), usize>::default();
             let (start, _, end) = petri_net.add_connected_places(
                 Place::new("Start", 1),
                 Place::new("End", 0),
