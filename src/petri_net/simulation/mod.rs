@@ -25,6 +25,18 @@ impl<S: 'static + Send> Callable<S> for fn(S) -> S {
     }
 }
 
+impl Callable<()> for fn() -> futures::future::BoxFuture<'static, ()> {
+    fn create_future(&self, _state: ()) -> impl std::future::Future<Output = ()> + 'static + Send {
+        (*self)()
+    }
+}
+
+impl<S: 'static + Send> Callable<S> for fn(S) -> futures::future::BoxFuture<'static, S> {
+    fn create_future(&self, state: S) -> impl std::future::Future<Output = S> + 'static + Send {
+        (*self)(state)
+    }
+}
+
 /// A backend executor for running tasks.
 pub trait Executor {
     /// The handle type for spawned tasks.

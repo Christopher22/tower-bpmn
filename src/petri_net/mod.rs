@@ -36,8 +36,20 @@ impl<C: Color> Place<C> {
 pub struct Transition<A, C: Color> {
     /// The action to perform when the transition fires.
     pub action: A,
-    input: Vec<Arc<Place<C>, C>>,
-    output: Vec<Arc<Place<C>, C>>,
+    pub(crate) input: Vec<Arc<Place<C>, C>>,
+    pub(crate) output: Vec<Arc<Place<C>, C>>,
+}
+
+impl<A, C: Color> Transition<A, C> {
+    /// Get the input arcs for this transition.
+    pub(crate) fn input(&self) -> &[Arc<Place<C>, C>] {
+        &self.input
+    }
+
+    /// Get the output arcs for this transition.
+    pub(crate) fn output(&self) -> &[Arc<Place<C>, C>] {
+        &self.output
+    }
 }
 
 impl<A, C: Color> std::fmt::Debug for Transition<A, C> {
@@ -47,7 +59,7 @@ impl<A, C: Color> std::fmt::Debug for Transition<A, C> {
 }
 
 #[derive(Debug, Clone)]
-struct Arc<T, C: Color> {
+pub(crate) struct Arc<T, C: Color> {
     pub target: Id<T>,
     pub weights: C::Weight,
 }
