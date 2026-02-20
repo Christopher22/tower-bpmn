@@ -8,9 +8,7 @@ use std::{
 };
 
 pub use self::color::{Color, UsizeWeight};
-pub use self::simulation::{
-    Callable, CompetingStrategy, Executor, FirstCompetingStrategy, Simulation,
-};
+pub use self::simulation::{Callable, CompetingStrategy, FirstCompetingStrategy, Simulation};
 pub use self::store::{Entry, Id, Store};
 
 /// A place in a Petri net.

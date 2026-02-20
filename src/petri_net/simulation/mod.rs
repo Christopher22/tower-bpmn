@@ -1,9 +1,10 @@
 mod tasks;
 
-use futures::{FutureExt, StreamExt, task::Spawn};
+use futures::StreamExt;
 
 use self::tasks::{Tasks, Update};
 use super::{Color, EnabledTransitions, Entry, Id, Marking, PetriNet, Transition};
+use crate::executor::Executor;
 
 /// A action stored for a transition which could be executed asynchronously.
 pub trait Callable<S: 'static + Send>: 'static {
@@ -37,34 +38,6 @@ impl<S: 'static + Send> Callable<S> for fn(S) -> futures::future::BoxFuture<'sta
     }
 }
 
-/// A backend executor for running tasks.
-pub trait Executor {
-    /// The handle type for spawned tasks.
-    type TaskHandle;
-
-    /// Spawn a new asynchronous task.
-    fn spawn_task(
-        &self,
-        value: impl std::future::Future<Output = ()> + 'static + Send,
-    ) -> Self::TaskHandle;
-
-    /// Stop a running task.
-    fn stop(&self, task: Self::TaskHandle) -> impl std::future::Future<Output = ()>;
-}
-
-impl Executor for futures::executor::LocalSpawner {
-    type TaskHandle = ();
-
-    fn spawn_task(
-        &self,
-        value: impl std::future::Future<Output = ()> + 'static + Send,
-    ) -> Self::TaskHandle {
-        self.spawn_obj(value.boxed().into()).unwrap();
-    }
-
-    async fn stop(&self, _task: Self::TaskHandle) {}
-}
-
 /// The Strategy for resolving competing transitions.
 pub trait CompetingStrategy {
     /// Select one transition from the competing ones. Transition is guaranteed to have at least one element.
@@ -82,7 +55,7 @@ impl CompetingStrategy for FirstCompetingStrategy {
 }
 
 /// A run of a Petri net simulation.
-pub struct Simulation<E: Executor, S: CompetingStrategy, A, C: Color> {
+pub struct Simulation<E: Executor<()>, S: CompetingStrategy, A, C: Color> {
     petri_net: std::sync::Arc<PetriNet<A, C>>,
     marking: Marking<C>,
     receiver: futures::channel::mpsc::UnboundedReceiver<Update<A, C>>,
@@ -90,7 +63,7 @@ pub struct Simulation<E: Executor, S: CompetingStrategy, A, C: Color> {
     competing_strategy: S,
 }
 
-impl<E: Executor, S: CompetingStrategy, A, C: Color> Simulation<E, S, A, C> {
+impl<E: Executor<()>, S: CompetingStrategy, A, C: Color> Simulation<E, S, A, C> {
     /// Prepare a new simulation for the given Petri net.
     pub fn new(
         executor: E,
@@ -109,7 +82,9 @@ impl<E: Executor, S: CompetingStrategy, A, C: Color> Simulation<E, S, A, C> {
     }
 }
 
-impl<E: Executor, S: CompetingStrategy, A: Callable<C::State>, C: Color> Simulation<E, S, A, C> {
+impl<E: Executor<()>, S: CompetingStrategy, A: Callable<C::State>, C: Color>
+    Simulation<E, S, A, C>
+{
     /// Run all enabled transitions and return whether there are no more tasks running.
     fn run_all_transactions(&mut self) -> bool {
         for enabled_transaction in
@@ -151,9 +126,27 @@ impl<E: Executor, S: CompetingStrategy, A: Callable<C::State>, C: Color> Simulat
     }
 }
 
+impl<E: Executor<()>, S: CompetingStrategy, A, C: Color> std::ops::Deref
+    for Simulation<E, S, A, C>
+{
+    type Target = Marking<C>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.marking
+    }
+}
+
+impl<E: Executor<()>, S: CompetingStrategy, A, C: Color> std::ops::DerefMut
+    for Simulation<E, S, A, C>
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.marking
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{Place, petri_net::UsizeWeight};
+    use crate::{petri_net::Place, petri_net::UsizeWeight};
 
     use super::*;
 

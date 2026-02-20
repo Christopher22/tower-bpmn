@@ -15,7 +15,7 @@ pub struct Update<A, C: Color> {
 
 impl<A, C: Color> Update<A, C> {
     /// Finish processing the update the marking.
-    pub async fn finish<E: Executor>(
+    pub async fn finish<E: Executor<()>>(
         self,
         tasks: &mut Tasks<E, A, C>,
         petri_net: &PetriNet<A, C>,
@@ -27,13 +27,13 @@ impl<A, C: Color> Update<A, C> {
     }
 }
 
-pub struct Tasks<E: Executor, A, C: Color> {
+pub struct Tasks<E: Executor<()>, A, C: Color> {
     tasks: HashMap<TaskId, E::TaskHandle>,
     sender: futures::channel::mpsc::UnboundedSender<Update<A, C>>,
     executor: E,
 }
 
-impl<E: Executor, A, C: Color> Tasks<E, A, C> {
+impl<E: Executor<()>, A, C: Color> Tasks<E, A, C> {
     pub fn new(executor: E, sender: futures::channel::mpsc::UnboundedSender<Update<A, C>>) -> Self {
         Tasks {
             tasks: HashMap::new(),
@@ -53,7 +53,7 @@ impl<E: Executor, A, C: Color> Tasks<E, A, C> {
     }
 }
 
-impl<E: Executor, A: Callable<C::State>, C: Color> Tasks<E, A, C> {
+impl<E: Executor<()>, A: Callable<C::State>, C: Color> Tasks<E, A, C> {
     pub fn spawn(&mut self, transition: Entry<'_, Transition<A, C>>, state: C::State) {
         let task_id = TaskId(self.tasks.len());
         let sender = self.sender.clone();
