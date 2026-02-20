@@ -7,7 +7,9 @@ use std::{
     ops::{Index, IndexMut},
 };
 
+#[allow(unused_imports)]
 pub use self::color::{Color, UsizeWeight};
+#[allow(unused_imports)]
 pub use self::simulation::{Callable, CompetingStrategy, FirstCompetingStrategy, Simulation};
 pub use self::store::{Entry, Id, Store};
 
@@ -36,18 +38,6 @@ pub struct Transition<A, C: Color> {
     pub action: A,
     pub(crate) input: Vec<Arc<Place<C>, C>>,
     pub(crate) output: Vec<Arc<Place<C>, C>>,
-}
-
-impl<A, C: Color> Transition<A, C> {
-    /// Get the input arcs for this transition.
-    pub(crate) fn input(&self) -> &[Arc<Place<C>, C>] {
-        &self.input
-    }
-
-    /// Get the output arcs for this transition.
-    pub(crate) fn output(&self) -> &[Arc<Place<C>, C>] {
-        &self.output
-    }
 }
 
 impl<A, C: Color> std::fmt::Debug for Transition<A, C> {
@@ -284,6 +274,39 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_place_connection_is_rejected() {
+        let mut petri_net = PetriNet::<fn(), usize>::default();
+        let p1 = petri_net.add_place(Place::new("P1", 1));
+        let p2 = petri_net.add_place(Place::new("P2", 0));
+        let t = petri_net.add_transition(|| {});
+
+        assert!(petri_net.connect_place(p1, t, UsizeWeight::DEFAULT));
+        assert!(!petri_net.connect_place(p1, t, UsizeWeight::DEFAULT));
+        assert!(petri_net.connect_transition(t, p2, UsizeWeight::DEFAULT));
+    }
+
+    #[test]
+    fn test_duplicate_transition_connection_is_rejected() {
+        let mut petri_net = PetriNet::<fn(), usize>::default();
+        let p1 = petri_net.add_place(Place::new("P1", 1));
+        let p2 = petri_net.add_place(Place::new("P2", 0));
+        let t = petri_net.add_transition(|| {});
+
+        assert!(petri_net.connect_place(p1, t, UsizeWeight::DEFAULT));
+        assert!(petri_net.connect_transition(t, p2, UsizeWeight::DEFAULT));
+        assert!(!petri_net.connect_transition(t, p2, UsizeWeight::DEFAULT));
+    }
+
+    #[test]
+    fn test_no_enabled_transitions_for_empty_marking() {
+        let mut petri_net = PetriNet::<fn(), usize>::default();
+        petri_net.add_connected_places(Place::new("Start", 0), Place::new("End", 0), || {});
+
+        let enabled: Vec<_> = EnabledTransitions::find_all(&petri_net, Marking::empty()).collect();
+        assert!(enabled.is_empty());
+    }
+
+    #[test]
     fn test_enabled_transitions() {
         let mut petri_net = PetriNet::<fn(), usize>::default();
         let (_, trans_s_p1, p1) =
@@ -307,14 +330,10 @@ mod tests {
         assert!(
             enabled_transitions
                 .iter()
-                .find(|value| matches!(value, EnabledTransitions::Competing(v) if v.len() == 2 && v.iter().any(|t| t.id == trans_p1_p2) && v.iter().any(|t| t.id == trans_p1_p3)))
-                .is_some()
+                .any(|value| matches!(value, EnabledTransitions::Competing(v) if v.len() == 2 && v.iter().any(|t| t.id == trans_p1_p2) && v.iter().any(|t| t.id == trans_p1_p3)))
         );
-        assert!(
-            enabled_transitions
-                .iter()
-                .find(|value| matches!(value, EnabledTransitions::Independent(t) if t.id == trans_s_p1))
-                .is_some()
-        );
+        assert!(enabled_transitions.iter().any(
+            |value| matches!(value, EnabledTransitions::Independent(t) if t.id == trans_s_p1)
+        ));
     }
 }

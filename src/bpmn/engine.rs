@@ -1,9 +1,6 @@
 use std::{any::TypeId, collections::HashMap, sync::Arc};
 
-use super::{
-    ExtendedExecutor, FirstCompetingStrategy, Process, State, Step, Value,
-    messages::ProcessMessages, token::Token,
-};
+use super::{ExtendedExecutor, FirstCompetingStrategy, Process, State, Step, Value, token::Token};
 use crate::{
     Instance, InstanceError, Message, MessageManager, ProcessBuilder, SendError,
     petri_net::{PetriNet, Simulation},
@@ -12,17 +9,16 @@ use crate::{
 /// A raw process definition, which is used internally for storing the process definition and creating process instances.
 /// It contains the PetriNet representation of the process, the start and end places of the process, and the type information of the process and its input.
 pub(crate) struct RawProcess {
-    petri_net: std::sync::Arc<PetriNet<Step, State>>,
-    start: crate::petri_net::Id<crate::petri_net::Place<State>>,
-    end: crate::petri_net::Id<crate::petri_net::Place<State>>,
+    pub(crate) petri_net: Arc<PetriNet<Step, State>>,
+    pub(crate) start: crate::petri_net::Id<crate::petri_net::Place<State>>,
+    pub(crate) end: crate::petri_net::Id<crate::petri_net::Place<State>>,
     process_type: TypeId,
     input_type: TypeId,
-    messages: ProcessMessages,
 }
 
 impl RawProcess {
     /// Create a new raw process from a PetriNet representation and type information.
-    pub fn new<P: Process, E: Value>(
+    pub fn new<P: Process>(
         petri_net: Arc<PetriNet<Step, State>>,
         start_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
         current_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
@@ -32,8 +28,7 @@ impl RawProcess {
             start: start_place,
             end: current_place,
             process_type: TypeId::of::<P>(),
-            input_type: TypeId::of::<E>(),
-            messages: ProcessMessages::new(),
+            input_type: TypeId::of::<P::Input>(),
         }
     }
 
@@ -48,12 +43,6 @@ impl RawProcess {
             TypeId::of::<V>(),
             "The input type does not match the expected type for this process"
         );
-        assert_eq!(
-            self.process_type,
-            TypeId::of::<()>(),
-            "The process type does not match the expected type for this process"
-        );
-
         let token = Token::new().set_output("Start", input);
         let mut simulation =
             Simulation::new(executor, self.petri_net.clone(), FirstCompetingStrategy);
@@ -71,7 +60,7 @@ impl<P: Process, E: Value> TryFrom<ProcessBuilder<P, E>> for RawProcess {
             None => return Err(ProcessError::DanglingProcessPart),
         }
 
-        Ok(Self::new::<P, E>(
+        Ok(Self::new::<P>(
             Arc::new(petri_net),
             builder.start_place,
             builder.current_place,
@@ -79,13 +68,23 @@ impl<P: Process, E: Value> TryFrom<ProcessBuilder<P, E>> for RawProcess {
     }
 }
 
+/// Runtime that stores process definitions and starts process instances.
 pub struct Runtime<E: ExtendedExecutor> {
     pub(crate) executor: E,
     registered_processes: HashMap<String, RawProcess>,
     message_manager: MessageManager,
 }
 
-impl<E: ExtendedExecutor> Runtime<E> {
+impl<E: ExtendedExecutor> std::fmt::Debug for Runtime<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Runtime")
+            .field("registered_processes", &self.registered_processes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<E: ExtendedExecutor + 'static> Runtime<E> {
+    /// Creates a new runtime with the provided executor backend.
     pub fn new(executor: E) -> Self {
         Runtime {
             executor,
@@ -94,6 +93,7 @@ impl<E: ExtendedExecutor> Runtime<E> {
         }
     }
 
+    /// Registers a process definition in the runtime.
     pub fn register_process<P: Process>(&mut self, process: P) -> Result<(), ProcessError> {
         let name = process.name();
         let raw_process = {
@@ -116,7 +116,7 @@ impl<E: ExtendedExecutor> Runtime<E> {
             Some(raw_process) if raw_process.process_type == TypeId::of::<P>() => {
                 Ok(Instance::new(self, raw_process, input))
             }
-            Some(_) => todo!(),
+            Some(_) => Err(InstanceError::InvalidContext),
             None => Err(InstanceError::Unregistered),
         }
     }
@@ -132,6 +132,9 @@ impl<E: ExtendedExecutor> Runtime<E> {
     }
 }
 
-enum ProcessError {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Errors while registering a process definition.
+pub enum ProcessError {
+    /// A split builder branch escaped and prevented process finalization.
     DanglingProcessPart,
 }

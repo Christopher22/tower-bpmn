@@ -1,9 +1,15 @@
 mod engine;
+/// Gateway primitives for splitting and joining BPMN control flow.
+pub mod gateways;
 mod messages;
+#[cfg(test)]
+mod tests;
 mod token;
 
 use chrono::DateTime;
 use parking_lot::RwLock;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::{borrow::Cow, ops::IndexMut};
 
@@ -13,122 +19,7 @@ pub use self::engine::Runtime;
 pub use self::messages::{CorrelationKey, Message, MessageManager, ProcessMessages, SendError};
 pub use self::token::{Token, Value};
 
-pub mod gateways {
-    use std::ops::DerefMut;
-
-    use crate::petri_net::{Id, PetriNet, Place};
-
-    use super::Value;
-
-    pub trait Gateway: 'static + Sized {}
-
-    pub trait SplitableGateway: Gateway {
-        fn add_nodes<const NUM: usize>(
-            &self,
-            petri_net: impl DerefMut<Target = PetriNet<super::Step, super::State>>,
-            current_place: Id<Place<super::State>>,
-        ) -> [Id<Place<super::State>>; NUM];
-    }
-
-    pub trait JoinableGateway<const NUM: usize, V: super::Value>: Gateway {
-        type Output: Value;
-    }
-
-    /// The BPMN "XOR" gateway, which can be used for both splitting and joining. For splitting, exactly one output branch will be executed based on the callback function. For joining, the gateway will wait until one of the input branches is completed before proceeding.
-    #[derive(Debug)]
-    pub struct Xor<C: 'static, V: Value>(C, std::marker::PhantomData<V>);
-
-    impl<V: Value> Xor<(), V> {
-        pub fn for_joining() -> Self {
-            Xor((), std::marker::PhantomData)
-        }
-    }
-
-    impl<C: Fn(&super::Token, V) -> usize, V: Value> Xor<C, V> {
-        pub fn for_splitting(callback: C) -> Self {
-            Xor(callback, std::marker::PhantomData)
-        }
-    }
-
-    impl<C, V: Value> Gateway for Xor<C, V> {}
-    impl<const NUM: usize, V: Value> JoinableGateway<NUM, V> for Xor<(), V> {
-        type Output = V;
-    }
-    impl<V: super::Value, C: Fn(&super::Token, V) -> usize + Clone + Sync + Send + 'static>
-        SplitableGateway for Xor<C, V>
-    {
-        fn add_nodes<const NUM: usize>(
-            &self,
-            mut petri_net: impl DerefMut<Target = PetriNet<super::Step, super::State>>,
-            current_place: Id<Place<super::State>>,
-        ) -> [Id<Place<super::State>>; NUM] {
-            let petri_net = petri_net.deref_mut();
-            std::array::from_fn(|i| {
-                let new_place = petri_net.add_place(crate::petri_net::Place::new(
-                    format!("XOR Output {}", i),
-                    super::State::Inactive,
-                ));
-                let transition = petri_net.add_transition(super::Step::Task(
-                    format!("XOR Transition {}", i),
-                    Box::new({
-                        let callback = self.0.clone();
-                        move |_name: &str, state: Vec<super::Token>| {
-                            assert!(
-                                state.len() == 1,
-                                "Exactly one token should be consumed by a task"
-                            );
-                            let token = state.into_iter().next().unwrap();
-                            let value = token
-                                .get_last::<V>()
-                                .expect("the input value should be present in the token history");
-                            if callback(&token, value) == i {
-                                vec![token]
-                            } else {
-                                vec![]
-                            }
-                        }
-                    }),
-                ));
-                petri_net.connect_place(current_place, transition, ());
-                petri_net.connect_transition(transition, new_place, ());
-                new_place
-            })
-        }
-    }
-
-    /// The BPMN "AND" gateway, which can be used for both splitting and joining. For splitting, all output branches will be executed in parallel. For joining, the gateway will wait until all input branches are completed before proceeding.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct And;
-
-    impl Gateway for And {}
-    impl SplitableGateway for And {
-        fn add_nodes<const NUM: usize>(
-            &self,
-            mut petri_net: impl DerefMut<Target = PetriNet<super::Step, super::State>>,
-            current_place: Id<Place<super::State>>,
-        ) -> [Id<Place<super::State>>; NUM] {
-            let petri_net = petri_net.deref_mut();
-            let transition_and = petri_net.add_transition(super::Step::And(NUM));
-            petri_net.connect_place(current_place, transition_and, ());
-
-            std::array::from_fn(|i| {
-                let next_place = petri_net.add_place(crate::petri_net::Place::new(
-                    format!("AND Output {}", i),
-                    super::State::Inactive,
-                ));
-                petri_net.connect_transition(transition_and, next_place, ());
-                next_place
-            })
-        }
-    }
-    impl<const NUM: usize, V: Value> JoinableGateway<NUM, V> for And
-    where
-        [V; NUM]: Value,
-    {
-        type Output = [V; NUM];
-    }
-}
-
+/// Executor abstraction required by the BPMN runtime.
 pub trait ExtendedExecutor:
     Send + Executor<()> + Executor<crate::petri_net::Marking<State>>
 {
@@ -138,16 +29,21 @@ impl<T: Send + Executor<()> + Executor<crate::petri_net::Marking<State>>> Extend
 
 impl Token {
     /// Get the name of the current task this token is at. This is used for querying the current state of the process instance.
-    pub fn current_task(&self) -> &str {
-        todo!()
+    pub fn current_task(&self) -> String {
+        self.current_task_name()
+            .unwrap_or_else(|| "Start".to_string())
     }
 }
 
 /// A "color" for tokens in a BPMN process. This is used to track the state of the process and determine which tasks are enabled within a correpsonding PetriNet.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub enum State {
+    /// No token is currently available at this place.
+    #[default]
     Inactive,
+    /// A transition has consumed the token and is currently executing.
     InProgress,
+    /// Execution completed and produced a token at this place.
     Completed(Token),
 }
 
@@ -156,14 +52,8 @@ impl Clone for State {
         match self {
             Self::Inactive => Self::Inactive,
             Self::InProgress => Self::InProgress,
-            Self::Completed(_) => panic!("State containing a token should not be cloned"),
+            Self::Completed(token) => Self::Completed(token.snapshot()),
         }
-    }
-}
-
-impl Default for State {
-    fn default() -> Self {
-        State::Inactive
     }
 }
 
@@ -228,10 +118,14 @@ impl crate::petri_net::Color for State {
     }
 }
 
+/// A BPMN process definition.
 pub trait Process: 'static + Sized {
+    /// Input payload type for starting a process instance.
     type Input: Value;
+    /// Final output payload type of the process.
     type Output: Value;
 
+    /// Stable process name used for registration and dispatch.
     fn name(&self) -> &str;
 
     /// Define the process by building a process builder.
@@ -241,27 +135,21 @@ pub trait Process: 'static + Sized {
     ) -> ProcessBuilder<Self, Self::Output>;
 }
 
-enum Step {
+pub(crate) enum Step {
     And(usize),
-    Task(
-        String,
-        Box<dyn Fn(&str, Vec<Token>) -> Vec<Token> + Send + Sync>,
-    ),
-    Waitable(
-        String,
-        Box<
-            dyn Fn(&str, Vec<Token>) -> Box<dyn futures::Future<Output = Vec<Token>> + Send>
-                + Send
-                + Sync,
-        >,
-    ),
+    Task(String, StepTaskFn),
+    Waitable(String, StepWaitFn),
 }
+
+type StepTaskFn = Box<dyn Fn(&str, Vec<Token>) -> Vec<Token> + Send + Sync>;
+type StepWaitFuture = Pin<Box<dyn futures::Future<Output = Vec<Token>> + Send>>;
+type StepWaitFn = Box<dyn Fn(&str, Vec<Token>) -> StepWaitFuture + Send + Sync>;
 
 impl crate::petri_net::Callable<Vec<Token>> for Step {
     fn create_future(
         &self,
         state: Vec<Token>,
-    ) -> impl std::future::Future<Output = Vec<Token>> + 'static + Send {
+    ) -> impl Future<Output = Vec<Token>> + 'static + Send {
         match self {
             Step::And(num_copies) => {
                 assert_eq!(
@@ -270,29 +158,36 @@ impl crate::petri_net::Callable<Vec<Token>> for Step {
                     "Exactly one token should be consumed by an AND step"
                 );
                 let token = state.into_iter().next().unwrap();
-                futures::future::Either::Left(futures::future::ready(
+                Box::pin(futures::future::ready(
                     (0..*num_copies).map(|_| token.clone()).collect(),
                 ))
             }
             Step::Task(name, task) => {
                 let result = task(name, state);
-                futures::future::Either::Left(futures::future::ready(result))
+                Box::pin(futures::future::ready(result))
             }
-            Step::Waitable(name, future) => futures::future::Either::Right(future(name, state)),
+            Step::Waitable(name, future) => future(name, state),
         }
     }
 }
 
+/// Builder used to define BPMN processes declaratively.
 pub struct ProcessBuilder<P: Process, E: Value> {
     process: std::marker::PhantomData<fn() -> P>,
     input_type: std::marker::PhantomData<fn() -> E>,
-    pub(crate) petri_net: Arc<RwLock<crate::petri_net::PetriNet<Step, State>>>,
-    pub(crate) start_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
-    pub(crate) current_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
+    petri_net: Arc<RwLock<crate::petri_net::PetriNet<Step, State>>>,
+    start_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
+    current_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
     message_manager: MessageManager,
 }
 
-impl<'a, P: Process, E: Value> ProcessBuilder<P, E> {
+impl<P: Process, E: Value> std::fmt::Debug for ProcessBuilder<P, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProcessBuilder").finish_non_exhaustive()
+    }
+}
+
+impl<P: Process, E: Value> ProcessBuilder<P, E> {
     pub(crate) fn new(message_manager: MessageManager) -> Self {
         let mut petri_net = crate::petri_net::PetriNet::default();
         let current_place =
@@ -301,7 +196,7 @@ impl<'a, P: Process, E: Value> ProcessBuilder<P, E> {
             process: std::marker::PhantomData,
             input_type: std::marker::PhantomData,
             petri_net: Arc::new(RwLock::new(petri_net)),
-            start_place: current_place.clone(),
+            start_place: current_place,
             current_place,
             message_manager,
         }
@@ -324,7 +219,7 @@ impl<'a, P: Process, E: Value> ProcessBuilder<P, E> {
 
     fn wrap_function<const ADD_OUTPUT: bool, U: Value>(
         func: impl Fn(&Token, E) -> U + 'static + Send + Sync,
-    ) -> Box<dyn Fn(&str, Vec<Token>) -> Vec<Token> + Send + Sync> {
+    ) -> StepTaskFn {
         Box::new(move |name: &str, state: Vec<Token>| {
             assert!(
                 state.len() == 1,
@@ -343,6 +238,7 @@ impl<'a, P: Process, E: Value> ProcessBuilder<P, E> {
         })
     }
 
+    /// Adds a service task that transforms the current payload.
     pub fn then<U: Value>(
         mut self,
         name: impl Into<Cow<'static, str>>,
@@ -362,6 +258,7 @@ impl<'a, P: Process, E: Value> ProcessBuilder<P, E> {
         }
     }
 
+    /// Adds a throw-message task that emits a message for another process.
     pub fn throw_message<P2: Process, V: Value>(
         mut self,
         name: impl Into<Cow<'static, str>>,
@@ -388,6 +285,7 @@ impl<'a, P: Process, E: Value> ProcessBuilder<P, E> {
         }
     }
 
+    /// Splits the flow into `NUM` branches using the provided gateway.
     pub fn split<const NUM: usize, G: gateways::SplitableGateway>(
         self,
         gateway: G,
@@ -404,12 +302,16 @@ impl<'a, P: Process, E: Value> ProcessBuilder<P, E> {
             })
     }
 
-    pub fn wait_for<P2: Process, W: Waitable<P2, E> + 'static>(
-        self,
-        waitable: W,
-    ) -> ProcessBuilder<P, E> {
+    /// Adds a wait state that resumes once the given waitable completes.
+    pub fn wait_for<P2: Process, O: Value, W: Waitable<P2, E, O> + Send + Sync + 'static>(
+        mut self,
+        mut waitable: W,
+    ) -> ProcessBuilder<P, O> {
+        waitable.bind_messages(self.message_manager.get_messages_for_process::<P2>());
+        let waitable = Arc::new(waitable);
         let name = waitable.name().to_string();
         let generator = Box::new(move |name: &str, state: Vec<Token>| {
+            let waitable = waitable.clone();
             assert!(
                 state.len() == 1,
                 "Exactly one token should be consumed by a wait step"
@@ -418,7 +320,13 @@ impl<'a, P: Process, E: Value> ProcessBuilder<P, E> {
             let value: E = token
                 .get_last()
                 .expect("the input value should be present in the token history");
-            Box::new(waitable.wait_for(&token, value))
+            let output_name = name.to_string();
+            let future: Pin<Box<dyn futures::Future<Output = Vec<Token>> + Send>> =
+                Box::pin(async move {
+                    let output = waitable.wait_for(&token, value).await;
+                    vec![token.set_output(output_name, output)]
+                });
+            future
         });
         ProcessBuilder {
             current_place: self.add_next_place(name.clone(), Step::Waitable(name, generator)),
@@ -430,11 +338,30 @@ impl<'a, P: Process, E: Value> ProcessBuilder<P, E> {
         }
     }
 
+    /// Joins parallel branches into one flow using the provided gateway.
     pub fn join<const NUM: usize, G: gateways::JoinableGateway<NUM, E>>(
         gateway: G,
         parts: [ProcessBuilder<P, E>; NUM],
     ) -> ProcessBuilder<P, G::Output> {
-        todo!()
+        let first = &parts[0];
+        for part in parts.iter().skip(1) {
+            assert!(
+                Arc::ptr_eq(&first.petri_net, &part.petri_net),
+                "All process parts must belong to the same process definition"
+            );
+        }
+
+        let current_places = parts.each_ref().map(|part| part.current_place);
+        let current_place = gateway.add_nodes(first.petri_net.write(), current_places);
+
+        ProcessBuilder {
+            process: std::marker::PhantomData,
+            input_type: std::marker::PhantomData,
+            petri_net: first.petri_net.clone(),
+            start_place: first.start_place,
+            current_place,
+            message_manager: first.message_manager.clone(),
+        }
     }
 }
 
@@ -443,34 +370,64 @@ pub struct Instance<'a, A: ExtendedExecutor> {
     engine: &'a Runtime<A>,
     uuid: uuid::Uuid,
     simulation: <A as Executor<crate::petri_net::Marking<State>>>::TaskHandle,
+    end_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
 }
 
-impl<'a, A: ExtendedExecutor> Instance<'a, A> {
-    fn new<V: Value>(
-        engine: &'a Runtime<A>,
-        process_raw: &self::engine::RawProcess,
-        input: V,
-    ) -> Self {
+impl<'a, A: ExtendedExecutor> std::fmt::Debug for Instance<'a, A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Instance")
+            .field("uuid", &self.uuid)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, A: ExtendedExecutor + 'static> Instance<'a, A> {
+    fn new<V: Value>(engine: &'a Runtime<A>, process_raw: &engine::RawProcess, input: V) -> Self {
         let simulation = process_raw.instantiate(engine.executor.clone(), input);
         Self {
             engine,
             uuid: uuid::Uuid::new_v4(),
             simulation: engine.executor.spawn_task(simulation.run()),
+            end_place: process_raw.end,
         }
     }
 
     /// Wait for the process instance to complete and return the final context. The context can be used to query the final state of the process.
-    pub async fn wait_for_completion(&self) -> Token {
-        todo!()
+    pub async fn wait_for_completion(self) -> Token {
+        let mut marking: crate::petri_net::Marking<State> =
+            <A as Executor<crate::petri_net::Marking<State>>>::join(
+                &self.engine.executor,
+                self.simulation,
+            )
+            .await
+            .expect("process simulation failed to complete");
+        match std::mem::take(&mut marking[self.end_place]) {
+            State::Completed(token) => token,
+            _ => panic!("process completed without token at the end place"),
+        }
     }
 
     /// Stop the process instance and return the context for resuming later.
     pub fn stop(self) -> Token {
-        todo!()
+        futures::executor::block_on(async {
+            <A as Executor<crate::petri_net::Marking<State>>>::stop(
+                &self.engine.executor,
+                self.simulation,
+            )
+            .await;
+        });
+        Token::new()
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+impl<'a, A: ExtendedExecutor> std::fmt::Display for Instance<'a, A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.uuid)
+    }
+}
+
+/// Errors while creating or resolving an instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum InstanceError {
     /// Not registered
     Unregistered,
@@ -480,11 +437,17 @@ pub enum InstanceError {
     InvalidContext,
 }
 
+/// Asynchronous wait abstraction used for BPMN waiting events.
 pub trait Waitable<P: Process, T: Value, O: Value> {
-    type Future: std::future::Future<Output = O> + Send;
+    /// Future returned by the wait implementation.
+    type Future: Future<Output = O> + Send;
 
+    /// Human readable wait-step name written into token history.
     fn name(&self) -> &str;
-    fn wait_for<'a>(self, token: &'a Token, value: T) -> Self::Future;
+    /// Optional hook to inject process-scoped message channels.
+    fn bind_messages(&mut self, _messages: ProcessMessages) {}
+    /// Starts waiting for a value and resolves to the produced output.
+    fn wait_for(&self, token: &Token, value: T) -> Self::Future;
 }
 
 struct Timer(pub Cow<'static, str>);
@@ -496,7 +459,7 @@ impl<P: Process> Waitable<P, DateTime<chrono::Utc>, ()> for Timer {
         &self.0
     }
 
-    fn wait_for(self, _token: &Token, value: DateTime<chrono::Utc>) -> Self::Future {
+    fn wait_for(&self, _token: &Token, value: DateTime<chrono::Utc>) -> Self::Future {
         chrono::Utc::now()
             .signed_duration_since(value)
             .to_std()
@@ -513,43 +476,59 @@ impl<P: Process> Waitable<P, DateTime<chrono::Utc>, ()> for Timer {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+/// Waitable that resumes when a correlated message arrives.
+#[derive(Debug)]
 pub struct IncomingMessage<P: Process, E: Value>(
     P,
     Cow<'static, str>,
+    Option<ProcessMessages>,
     std::marker::PhantomData<fn() -> E>,
 );
 
 impl<P: Process, E: Value> IncomingMessage<P, E> {
+    /// Creates a new incoming-message waitable.
     pub fn new(process: P, name: impl Into<Cow<'static, str>>) -> Self {
-        IncomingMessage(process, name.into(), std::marker::PhantomData)
-    }
-}
-
-/// TODO
-pub struct TodoFuture<E> {
-    _marker: std::marker::PhantomData<fn() -> E>,
-}
-
-impl<E> futures::Future for TodoFuture<E> {
-    type Output = E;
-
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        todo!()
+        IncomingMessage(process, name.into(), None, std::marker::PhantomData)
     }
 }
 
 impl<P: Process, E: Value> Waitable<P, CorrelationKey, E> for IncomingMessage<P, E> {
-    type Future = TodoFuture<E>;
+    type Future = futures::future::BoxFuture<'static, E>;
 
     fn name(&self) -> &str {
         &self.1
     }
 
-    fn wait_for<'a>(self, _token: &'a Token, _value: CorrelationKey) -> Self::Future {
-        todo!()
+    fn bind_messages(&mut self, messages: ProcessMessages) {
+        self.2 = Some(messages);
+    }
+
+    fn wait_for(&self, _token: &Token, correlation_key: CorrelationKey) -> Self::Future {
+        let messages = self
+            .2
+            .clone()
+            .expect("incoming message waitable must be bound to a runtime");
+
+        let mut receiver = messages.subscribe();
+        if let Some(message) = messages.receive::<E>(correlation_key) {
+            return Box::pin(async move { message });
+        }
+
+        Box::pin(async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(key) if key == correlation_key => {
+                        if let Some(message) = messages.receive::<E>(key) {
+                            return message;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        panic!("message channel closed before expected message arrived")
+                    }
+                }
+            }
+        })
     }
 }

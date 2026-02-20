@@ -1,6 +1,7 @@
 mod tasks;
 
 use futures::StreamExt;
+use std::future::Future;
 
 use self::tasks::{Tasks, Update};
 use super::{Color, EnabledTransitions, Entry, Id, Marking, PetriNet, Transition};
@@ -9,31 +10,31 @@ use crate::executor::Executor;
 /// A action stored for a transition which could be executed asynchronously.
 pub trait Callable<S: 'static + Send>: 'static {
     /// Create a future that executes the action with the given state.
-    fn create_future(&self, state: S) -> impl std::future::Future<Output = S> + 'static + Send;
+    fn create_future(&self, state: S) -> impl Future<Output = S> + 'static + Send;
 }
 
 impl Callable<()> for fn() {
-    fn create_future(&self, _state: ()) -> impl std::future::Future<Output = ()> + 'static + Send {
+    fn create_future(&self, _state: ()) -> impl Future<Output = ()> + 'static + Send {
         let func = *self;
         async move { func() }
     }
 }
 
 impl<S: 'static + Send> Callable<S> for fn(S) -> S {
-    fn create_future(&self, state: S) -> impl std::future::Future<Output = S> + 'static + Send {
+    fn create_future(&self, state: S) -> impl Future<Output = S> + 'static + Send {
         let func = *self;
         async move { func(state) }
     }
 }
 
 impl Callable<()> for fn() -> futures::future::BoxFuture<'static, ()> {
-    fn create_future(&self, _state: ()) -> impl std::future::Future<Output = ()> + 'static + Send {
+    fn create_future(&self, _state: ()) -> impl Future<Output = ()> + 'static + Send {
         (*self)()
     }
 }
 
 impl<S: 'static + Send> Callable<S> for fn(S) -> futures::future::BoxFuture<'static, S> {
-    fn create_future(&self, state: S) -> impl std::future::Future<Output = S> + 'static + Send {
+    fn create_future(&self, state: S) -> impl Future<Output = S> + 'static + Send {
         (*self)(state)
     }
 }

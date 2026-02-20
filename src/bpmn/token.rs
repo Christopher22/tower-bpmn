@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use std::{any::Any, sync::Arc};
 
+/// Marker trait for values that can be stored in token history and messages.
 pub trait Value:
     'static + Sized + Send + Sync + Any + Clone + serde::Serialize + for<'a> serde::Deserialize<'a>
 {
@@ -21,6 +22,12 @@ pub struct TokenId(Uuid);
 impl TokenId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+}
+
+impl Default for TokenId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -60,6 +67,7 @@ impl Token {
     }
 
     /// Creates a new token. This is not a copy, but a child.
+    #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Token {
         let mut ids = self.ids.clone();
         ids.push(TokenId::new());
@@ -69,6 +77,14 @@ impl Token {
         }
     }
 
+    pub(crate) fn snapshot(&self) -> Token {
+        Self {
+            ids: self.ids.clone(),
+            shared_history: self.shared_history.clone(),
+        }
+    }
+
+    /// Returns the current branch-local token id.
     pub fn id(&self) -> TokenId {
         *self
             .ids
@@ -76,9 +92,10 @@ impl Token {
             .expect("current it is always at latest place")
     }
 
+    /// Adds a typed output value for the given step and returns the updated token.
     pub fn set_output<T: Value, S: Into<String>>(self, step: S, value: T) -> Self {
         let value = Entry::new(self.id(), step, value);
-        match self.shared_history.entry(std::any::TypeId::of::<T>()) {
+        match self.shared_history.entry(TypeId::of::<T>()) {
             dashmap::Entry::Occupied(mut entry) => {
                 entry.get_mut().push(value);
             }
@@ -89,23 +106,38 @@ impl Token {
         self
     }
 
+    /// Returns the most recent value of type `T` visible in this token branch.
     pub fn get_last<T: Value>(&self) -> Option<T> {
         self.shared_history
-            .get(&std::any::TypeId::of::<T>())
-            .and_then(|entry| {
-                for entry in entry.iter() {
-                    if self.ids.contains(&entry.token_id) {
-                        return Some(
-                            entry
-                                .value
-                                .downcast_ref::<T>()
-                                .expect("checked type")
-                                .clone(),
-                        );
-                    }
-                }
-                None
+            .get(&TypeId::of::<T>())
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .rev()
+                    .find(|entry| self.ids.contains(&entry.token_id))
+                    .map(|entry| {
+                        entry
+                            .value
+                            .downcast_ref::<T>()
+                            .expect("checked type")
+                            .clone()
+                    })
             })
+    }
+
+    pub(crate) fn current_task_name(&self) -> Option<String> {
+        self.shared_history
+            .iter()
+            .flat_map(|typed_entries| {
+                typed_entries
+                    .value()
+                    .iter()
+                    .map(|entry| (entry.timestamp, entry.place.clone(), entry.token_id))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|(_, _, token_id)| self.ids.contains(token_id))
+            .max_by_key(|(timestamp, _, _)| *timestamp)
+            .map(|(_, place, _)| place)
     }
 }
 
