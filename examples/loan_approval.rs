@@ -1,6 +1,6 @@
 use axum_bpmn::{Process, ProcessBuilder, Runtime, Token};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 struct LoanApplication {
     applicant_id: u64,
     amount: u32,

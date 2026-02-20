@@ -11,7 +11,17 @@ use crate::Process;
 
 use super::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+    schemars::JsonSchema,
+)]
 /// Correlation identifier for message-based process interaction.
 pub struct CorrelationKey(Uuid);
 

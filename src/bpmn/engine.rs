@@ -1,6 +1,11 @@
+use dashmap::DashMap;
 use std::{any::TypeId, collections::HashMap, sync::Arc};
+use uuid::Uuid;
 
-use super::{ExtendedExecutor, FirstCompetingStrategy, Process, State, Step, Value, token::Token};
+use super::{
+    ExtendedExecutor, FirstCompetingStrategy, Process, State, Step, Value,
+    token::{Token, TokenObserver},
+};
 use crate::{
     Instance, InstanceError, Message, MessageManager, ProcessBuilder, SendError,
     petri_net::{PetriNet, Simulation},
@@ -9,6 +14,7 @@ use crate::{
 /// A raw process definition, which is used internally for storing the process definition and creating process instances.
 /// It contains the PetriNet representation of the process, the start and end places of the process, and the type information of the process and its input.
 pub(crate) struct RawProcess {
+    pub(crate) name: String,
     pub(crate) petri_net: Arc<PetriNet<Step, State>>,
     pub(crate) start: crate::petri_net::Id<crate::petri_net::Place<State>>,
     pub(crate) end: crate::petri_net::Id<crate::petri_net::Place<State>>,
@@ -19,11 +25,13 @@ pub(crate) struct RawProcess {
 impl RawProcess {
     /// Create a new raw process from a PetriNet representation and type information.
     pub fn new<P: Process>(
+        name: String,
         petri_net: Arc<PetriNet<Step, State>>,
         start_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
         current_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
     ) -> Self {
         Self {
+            name,
             petri_net,
             start: start_place,
             end: current_place,
@@ -37,13 +45,19 @@ impl RawProcess {
         &self,
         executor: E,
         input: V,
+        observer: Option<TokenObserver>,
     ) -> Simulation<E, FirstCompetingStrategy, Step, State> {
         assert_eq!(
             self.input_type,
             TypeId::of::<V>(),
             "The input type does not match the expected type for this process"
         );
-        let token = Token::new().set_output("Start", input);
+        let token = match observer {
+            Some(observer) => Token::new()
+                .with_observer(observer)
+                .set_output("Start", input),
+            None => Token::new().set_output("Start", input),
+        };
         let mut simulation =
             Simulation::new(executor, self.petri_net.clone(), FirstCompetingStrategy);
         simulation[self.start] = State::Completed(token);
@@ -61,6 +75,7 @@ impl<P: Process, E: Value> TryFrom<ProcessBuilder<P, E>> for RawProcess {
         }
 
         Ok(Self::new::<P>(
+            std::any::type_name::<P>().to_string(),
             Arc::new(petri_net),
             builder.start_place,
             builder.current_place,
@@ -68,11 +83,47 @@ impl<P: Process, E: Value> TryFrom<ProcessBuilder<P, E>> for RawProcess {
     }
 }
 
+/// Status of a runtime-tracked process instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeInstanceStatus {
+    /// Instance is currently executing.
+    Running,
+    /// Instance finished successfully.
+    Completed,
+    /// Instance was explicitly stopped.
+    Stopped,
+}
+
+/// Public snapshot of a process instance tracked by the runtime.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RuntimeInstance {
+    /// Instance identifier.
+    pub id: Uuid,
+    /// BPMN process name.
+    pub process: String,
+    /// Current execution status.
+    pub status: RuntimeInstanceStatus,
+    /// Active place names for this instance.
+    pub current_places: Vec<String>,
+    /// Most recent task names observed in active tokens.
+    pub current_tasks: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeInstanceEntry {
+    pub(crate) process: String,
+    pub(crate) status: RuntimeInstanceStatus,
+    pub(crate) current_places: Vec<String>,
+    pub(crate) current_tasks: Vec<String>,
+}
+
 /// Runtime that stores process definitions and starts process instances.
 pub struct Runtime<E: ExtendedExecutor> {
     pub(crate) executor: E,
     registered_processes: HashMap<String, RawProcess>,
     message_manager: MessageManager,
+    pub(crate) instances: Arc<DashMap<Uuid, RuntimeInstanceEntry>>,
 }
 
 impl<E: ExtendedExecutor> std::fmt::Debug for Runtime<E> {
@@ -90,19 +141,66 @@ impl<E: ExtendedExecutor + 'static> Runtime<E> {
             executor,
             registered_processes: HashMap::new(),
             message_manager: MessageManager::new(),
+            instances: Arc::new(DashMap::new()),
         }
     }
 
     /// Registers a process definition in the runtime.
     pub fn register_process<P: Process>(&mut self, process: P) -> Result<(), ProcessError> {
         let name = process.name();
-        let raw_process = {
+        let mut raw_process = {
             let builder = ProcessBuilder::new(self.message_manager.clone());
             RawProcess::try_from(process.define(builder))?
         };
+        raw_process.name = name.to_string();
         self.registered_processes
             .insert(name.to_string(), raw_process);
         Ok(())
+    }
+
+    /// Return names of all registered processes.
+    pub fn registered_processes(&self) -> Vec<String> {
+        self.registered_processes.keys().cloned().collect()
+    }
+
+    /// Return all currently tracked instances.
+    pub fn instances(&self) -> Vec<RuntimeInstance> {
+        self.instances
+            .iter()
+            .map(|entry| RuntimeInstance {
+                id: *entry.key(),
+                process: entry.value().process.clone(),
+                status: entry.value().status,
+                current_places: entry.value().current_places.clone(),
+                current_tasks: entry.value().current_tasks.clone(),
+            })
+            .collect()
+    }
+
+    /// Return all instances that are still running.
+    pub fn running_instances(&self) -> Vec<RuntimeInstance> {
+        self.instances()
+            .into_iter()
+            .filter(|instance| instance.status == RuntimeInstanceStatus::Running)
+            .collect()
+    }
+
+    pub(crate) fn upsert_instance(&self, id: Uuid, entry: RuntimeInstanceEntry) {
+        self.instances.insert(id, entry);
+    }
+
+    pub(crate) fn update_instance(
+        &self,
+        id: Uuid,
+        status: RuntimeInstanceStatus,
+        current_places: Vec<String>,
+        current_tasks: Vec<String>,
+    ) {
+        if let Some(mut instance) = self.instances.get_mut(&id) {
+            instance.status = status;
+            instance.current_places = current_places;
+            instance.current_tasks = current_tasks;
+        }
     }
 
     /// Run a process with the given input. The process will be executed in the background, and an instance handle will be returned for waiting for completion or resuming later.

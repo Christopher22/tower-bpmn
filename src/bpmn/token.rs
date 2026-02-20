@@ -1,5 +1,6 @@
 use chrono::DateTime;
 use dashmap::DashMap;
+use schemars::JsonSchema;
 use std::any::TypeId;
 use uuid::Uuid;
 
@@ -7,14 +8,31 @@ use std::{any::Any, sync::Arc};
 
 /// Marker trait for values that can be stored in token history and messages.
 pub trait Value:
-    'static + Sized + Send + Sync + Any + Clone + serde::Serialize + for<'a> serde::Deserialize<'a>
+    'static
+    + Sized
+    + Send
+    + Sync
+    + Any
+    + Clone
+    + serde::Serialize
+    + for<'a> serde::Deserialize<'a>
+    + JsonSchema
 {
 }
 
 impl<T> Value for T where
-    T: Sized + Send + Sync + Any + Clone + serde::Serialize + for<'a> serde::Deserialize<'a>
+    T: Sized
+        + Send
+        + Sync
+        + Any
+        + Clone
+        + serde::Serialize
+        + for<'a> serde::Deserialize<'a>
+        + JsonSchema
 {
 }
+
+pub(crate) type TokenObserver = Arc<dyn Fn(&Token, &str) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TokenId(Uuid);
@@ -52,10 +70,18 @@ impl Entry {
 }
 
 /// A BPMN token.
-#[derive(Debug)]
 pub struct Token {
     ids: Vec<TokenId>,
     shared_history: Arc<DashMap<TypeId, Vec<Entry>>>,
+    observer: Option<TokenObserver>,
+}
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Token")
+            .field("ids", &self.ids)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Token {
@@ -63,7 +89,13 @@ impl Token {
         Self {
             ids: vec![TokenId::new()],
             shared_history: Arc::new(DashMap::new()),
+            observer: None,
         }
+    }
+
+    pub(crate) fn with_observer(mut self, observer: TokenObserver) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     /// Creates a new token. This is not a copy, but a child.
@@ -74,6 +106,7 @@ impl Token {
         Self {
             ids,
             shared_history: self.shared_history.clone(),
+            observer: self.observer.clone(),
         }
     }
 
@@ -81,6 +114,7 @@ impl Token {
         Self {
             ids: self.ids.clone(),
             shared_history: self.shared_history.clone(),
+            observer: self.observer.clone(),
         }
     }
 
@@ -94,7 +128,8 @@ impl Token {
 
     /// Adds a typed output value for the given step and returns the updated token.
     pub fn set_output<T: Value, S: Into<String>>(self, step: S, value: T) -> Self {
-        let value = Entry::new(self.id(), step, value);
+        let step_name = step.into();
+        let value = Entry::new(self.id(), step_name.clone(), value);
         match self.shared_history.entry(TypeId::of::<T>()) {
             dashmap::Entry::Occupied(mut entry) => {
                 entry.get_mut().push(value);
@@ -102,6 +137,9 @@ impl Token {
             dashmap::Entry::Vacant(entry) => {
                 entry.insert(vec![value]);
             }
+        }
+        if let Some(observer) = &self.observer {
+            observer(&self, &step_name);
         }
         self
     }

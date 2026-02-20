@@ -16,6 +16,7 @@ use std::{borrow::Cow, ops::IndexMut};
 use crate::{executor::Executor, petri_net::FirstCompetingStrategy};
 
 pub use self::engine::Runtime;
+pub use self::engine::{RuntimeInstance, RuntimeInstanceStatus};
 pub use self::messages::{CorrelationKey, Message, MessageManager, ProcessMessages, SendError};
 pub use self::token::{Token, Value};
 
@@ -369,6 +370,8 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
 pub struct Instance<'a, A: ExtendedExecutor> {
     engine: &'a Runtime<A>,
     uuid: uuid::Uuid,
+    process_name: String,
+    end_place_name: String,
     simulation: <A as Executor<crate::petri_net::Marking<State>>>::TaskHandle,
     end_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
 }
@@ -377,23 +380,55 @@ impl<'a, A: ExtendedExecutor> std::fmt::Debug for Instance<'a, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Instance")
             .field("uuid", &self.uuid)
+            .field("process_name", &self.process_name)
             .finish_non_exhaustive()
     }
 }
 
 impl<'a, A: ExtendedExecutor + 'static> Instance<'a, A> {
     fn new<V: Value>(engine: &'a Runtime<A>, process_raw: &engine::RawProcess, input: V) -> Self {
-        let simulation = process_raw.instantiate(engine.executor.clone(), input);
+        let uuid = uuid::Uuid::new_v4();
+        let process_name = process_raw.name.clone();
+        let end_place_name = process_raw.petri_net[process_raw.end].name.clone();
+        engine.upsert_instance(
+            uuid,
+            engine::RuntimeInstanceEntry {
+                process: process_name.clone(),
+                status: RuntimeInstanceStatus::Running,
+                current_places: vec![process_raw.petri_net[process_raw.start].name.clone()],
+                current_tasks: vec!["Start".to_string()],
+            },
+        );
+
+        let instances = engine.instances.clone();
+        let observer = Arc::new(move |token: &Token, place: &str| {
+            if let Some(mut instance) = instances.get_mut(&uuid) {
+                instance.status = RuntimeInstanceStatus::Running;
+                instance.current_places = vec![place.to_string()];
+                instance.current_tasks = vec![token.current_task()];
+            }
+        });
+        let simulation = process_raw.instantiate(engine.executor.clone(), input, Some(observer));
+
         Self {
             engine,
-            uuid: uuid::Uuid::new_v4(),
+            uuid,
+            process_name,
+            end_place_name,
             simulation: engine.executor.spawn_task(simulation.run()),
             end_place: process_raw.end,
         }
     }
 
+    /// Returns the unique identifier of this instance.
+    pub fn id(&self) -> uuid::Uuid {
+        self.uuid
+    }
+
     /// Wait for the process instance to complete and return the final context. The context can be used to query the final state of the process.
     pub async fn wait_for_completion(self) -> Token {
+        let instance_id = self.uuid;
+        let end_place_name = self.end_place_name.clone();
         let mut marking: crate::petri_net::Marking<State> =
             <A as Executor<crate::petri_net::Marking<State>>>::join(
                 &self.engine.executor,
@@ -402,13 +437,27 @@ impl<'a, A: ExtendedExecutor + 'static> Instance<'a, A> {
             .await
             .expect("process simulation failed to complete");
         match std::mem::take(&mut marking[self.end_place]) {
-            State::Completed(token) => token,
+            State::Completed(token) => {
+                self.engine.update_instance(
+                    instance_id,
+                    RuntimeInstanceStatus::Completed,
+                    vec![end_place_name],
+                    vec![token.current_task()],
+                );
+                token
+            }
             _ => panic!("process completed without token at the end place"),
         }
     }
 
     /// Stop the process instance and return the context for resuming later.
     pub fn stop(self) -> Token {
+        self.engine.update_instance(
+            self.uuid,
+            RuntimeInstanceStatus::Stopped,
+            Vec::new(),
+            Vec::new(),
+        );
         futures::executor::block_on(async {
             <A as Executor<crate::petri_net::Marking<State>>>::stop(
                 &self.engine.executor,

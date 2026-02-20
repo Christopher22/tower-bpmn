@@ -61,6 +61,11 @@ impl<C: Color> Marking<C> {
     pub const fn empty() -> Self {
         Marking(BTreeMap::new())
     }
+
+    /// Iterate over places that currently have non-default color values.
+    pub fn iter(&self) -> impl Iterator<Item = (&Id<Place<C>>, &C)> {
+        self.0.iter()
+    }
 }
 
 impl<C: Color> Index<Id<Place<C>>> for Marking<C> {
