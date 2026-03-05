@@ -2,9 +2,9 @@ mod engine;
 /// Gateway primitives for splitting and joining BPMN control flow.
 pub mod gateways;
 mod messages;
+mod process;
 #[cfg(test)]
 mod tests;
-mod token;
 
 use chrono::DateTime;
 use parking_lot::RwLock;
@@ -13,12 +13,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::{borrow::Cow, ops::IndexMut};
 
-use crate::{executor::Executor, petri_net::FirstCompetingStrategy};
+use crate::executor::Executor;
 
-pub use self::engine::Runtime;
-pub use self::engine::{RuntimeInstance, RuntimeInstanceStatus};
+pub use self::engine::{
+    Instance, InstanceError, InstanceId, InstanceStatus, Runtime, RuntimeInstance, SharedHistory,
+    Token, TokenId, Value,
+};
 pub use self::messages::{CorrelationKey, Message, MessageManager, ProcessMessages, SendError};
-pub use self::token::{Token, Value};
+pub use self::process::{MetaData, Process};
 
 /// Executor abstraction required by the BPMN runtime.
 pub trait ExtendedExecutor:
@@ -27,14 +29,6 @@ pub trait ExtendedExecutor:
 }
 
 impl<T: Send + Executor<()> + Executor<crate::petri_net::Marking<State>>> ExtendedExecutor for T {}
-
-impl Token {
-    /// Get the name of the current task this token is at. This is used for querying the current state of the process instance.
-    pub fn current_task(&self) -> String {
-        self.current_task_name()
-            .unwrap_or_else(|| "Start".to_string())
-    }
-}
 
 /// A "color" for tokens in a BPMN process. This is used to track the state of the process and determine which tasks are enabled within a correpsonding PetriNet.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -53,7 +47,7 @@ impl Clone for State {
         match self {
             Self::Inactive => Self::Inactive,
             Self::InProgress => Self::InProgress,
-            Self::Completed(token) => Self::Completed(token.snapshot()),
+            Self::Completed(_) => panic!("Clone is not supported."),
         }
     }
 }
@@ -63,6 +57,7 @@ impl crate::petri_net::Color for State {
 
     type State = Vec<Token>;
     type Weight = ();
+    type Id = String;
 
     fn is_transition_enabled<A>(
         transition: &crate::petri_net::Transition<A, Self>,
@@ -119,23 +114,6 @@ impl crate::petri_net::Color for State {
     }
 }
 
-/// A BPMN process definition.
-pub trait Process: 'static + Sized {
-    /// Input payload type for starting a process instance.
-    type Input: Value;
-    /// Final output payload type of the process.
-    type Output: Value;
-
-    /// Stable process name used for registration and dispatch.
-    fn name(&self) -> &str;
-
-    /// Define the process by building a process builder.
-    fn define(
-        &self,
-        builder: ProcessBuilder<Self, Self::Input>,
-    ) -> ProcessBuilder<Self, Self::Output>;
-}
-
 pub(crate) enum Step {
     And(usize),
     Task(String, StepTaskFn),
@@ -160,7 +138,7 @@ impl crate::petri_net::Callable<Vec<Token>> for Step {
                 );
                 let token = state.into_iter().next().unwrap();
                 Box::pin(futures::future::ready(
-                    (0..*num_copies).map(|_| token.clone()).collect(),
+                    (0..*num_copies).map(|_| token.fork()).collect(),
                 ))
             }
             Step::Task(name, task) => {
@@ -172,6 +150,8 @@ impl crate::petri_net::Callable<Vec<Token>> for Step {
     }
 }
 
+pub(crate) const START_NAME: &'static str = "Start";
+
 /// Builder used to define BPMN processes declaratively.
 pub struct ProcessBuilder<P: Process, E: Value> {
     process: std::marker::PhantomData<fn() -> P>,
@@ -180,6 +160,7 @@ pub struct ProcessBuilder<P: Process, E: Value> {
     start_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
     current_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
     message_manager: MessageManager,
+    used_names: std::collections::HashSet<String>,
 }
 
 impl<P: Process, E: Value> std::fmt::Debug for ProcessBuilder<P, E> {
@@ -192,7 +173,7 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
     pub(crate) fn new(message_manager: MessageManager) -> Self {
         let mut petri_net = crate::petri_net::PetriNet::default();
         let current_place =
-            petri_net.add_place(crate::petri_net::Place::new("Start", State::Inactive));
+            petri_net.add_place(crate::petri_net::Place::new(START_NAME, State::Inactive));
         ProcessBuilder {
             process: std::marker::PhantomData,
             input_type: std::marker::PhantomData,
@@ -200,6 +181,7 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
             start_place: current_place,
             current_place,
             message_manager,
+            used_names: [START_NAME.to_string()].into_iter().collect(),
         }
     }
 
@@ -208,6 +190,13 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
         name: String,
         step: Step,
     ) -> crate::petri_net::Id<crate::petri_net::Place<State>> {
+        // Ensure that task names are unique within the process definition for better observability and debugging.
+        if self.used_names.contains(&name) {
+            panic!("Duplicate task name: {name}");
+        } else {
+            self.used_names.insert(name.clone());
+        }
+
         let mut petri_net = self.petri_net.write();
         let new_place =
             petri_net.add_place(crate::petri_net::Place::new(name.clone(), State::Inactive));
@@ -256,6 +245,7 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
             petri_net: self.petri_net,
             start_place: self.start_place,
             message_manager: self.message_manager,
+            used_names: self.used_names,
         }
     }
 
@@ -283,6 +273,7 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
             petri_net: self.petri_net,
             start_place: self.start_place,
             message_manager: self.message_manager,
+            used_names: self.used_names,
         }
     }
 
@@ -300,6 +291,7 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
                 petri_net: self.petri_net.clone(),
                 start_place: self.start_place,
                 message_manager: self.message_manager.clone(),
+                used_names: self.used_names.clone(),
             })
     }
 
@@ -336,6 +328,7 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
             petri_net: self.petri_net,
             start_place: self.start_place,
             message_manager: self.message_manager,
+            used_names: self.used_names,
         }
     }
 
@@ -345,6 +338,11 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
         parts: [ProcessBuilder<P, E>; NUM],
     ) -> ProcessBuilder<P, G::Output> {
         let first = &parts[0];
+        let used_names = parts
+            .iter()
+            .flat_map(|part| part.used_names.iter())
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
         for part in parts.iter().skip(1) {
             assert!(
                 Arc::ptr_eq(&first.petri_net, &part.petri_net),
@@ -362,128 +360,9 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
             start_place: first.start_place,
             current_place,
             message_manager: first.message_manager.clone(),
+            used_names,
         }
     }
-}
-
-/// A instance of a process running in the background.
-pub struct Instance<'a, A: ExtendedExecutor> {
-    engine: &'a Runtime<A>,
-    uuid: uuid::Uuid,
-    process_name: String,
-    end_place_name: String,
-    simulation: <A as Executor<crate::petri_net::Marking<State>>>::TaskHandle,
-    end_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
-}
-
-impl<'a, A: ExtendedExecutor> std::fmt::Debug for Instance<'a, A> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Instance")
-            .field("uuid", &self.uuid)
-            .field("process_name", &self.process_name)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<'a, A: ExtendedExecutor + 'static> Instance<'a, A> {
-    fn new<V: Value>(engine: &'a Runtime<A>, process_raw: &engine::RawProcess, input: V) -> Self {
-        let uuid = uuid::Uuid::new_v4();
-        let process_name = process_raw.name.clone();
-        let end_place_name = process_raw.petri_net[process_raw.end].name.clone();
-        engine.upsert_instance(
-            uuid,
-            engine::RuntimeInstanceEntry {
-                process: process_name.clone(),
-                status: RuntimeInstanceStatus::Running,
-                current_places: vec![process_raw.petri_net[process_raw.start].name.clone()],
-                current_tasks: vec!["Start".to_string()],
-            },
-        );
-
-        let instances = engine.instances.clone();
-        let observer = Arc::new(move |token: &Token, place: &str| {
-            if let Some(mut instance) = instances.get_mut(&uuid) {
-                instance.status = RuntimeInstanceStatus::Running;
-                instance.current_places = vec![place.to_string()];
-                instance.current_tasks = vec![token.current_task()];
-            }
-        });
-        let simulation = process_raw.instantiate(engine.executor.clone(), input, Some(observer));
-
-        Self {
-            engine,
-            uuid,
-            process_name,
-            end_place_name,
-            simulation: engine.executor.spawn_task(simulation.run()),
-            end_place: process_raw.end,
-        }
-    }
-
-    /// Returns the unique identifier of this instance.
-    pub fn id(&self) -> uuid::Uuid {
-        self.uuid
-    }
-
-    /// Wait for the process instance to complete and return the final context. The context can be used to query the final state of the process.
-    pub async fn wait_for_completion(self) -> Token {
-        let instance_id = self.uuid;
-        let end_place_name = self.end_place_name.clone();
-        let mut marking: crate::petri_net::Marking<State> =
-            <A as Executor<crate::petri_net::Marking<State>>>::join(
-                &self.engine.executor,
-                self.simulation,
-            )
-            .await
-            .expect("process simulation failed to complete");
-        match std::mem::take(&mut marking[self.end_place]) {
-            State::Completed(token) => {
-                self.engine.update_instance(
-                    instance_id,
-                    RuntimeInstanceStatus::Completed,
-                    vec![end_place_name],
-                    vec![token.current_task()],
-                );
-                token
-            }
-            _ => panic!("process completed without token at the end place"),
-        }
-    }
-
-    /// Stop the process instance and return the context for resuming later.
-    pub fn stop(self) -> Token {
-        self.engine.update_instance(
-            self.uuid,
-            RuntimeInstanceStatus::Stopped,
-            Vec::new(),
-            Vec::new(),
-        );
-        futures::executor::block_on(async {
-            <A as Executor<crate::petri_net::Marking<State>>>::stop(
-                &self.engine.executor,
-                self.simulation,
-            )
-            .await;
-        });
-        Token::new()
-    }
-}
-
-impl<'a, A: ExtendedExecutor> std::fmt::Display for Instance<'a, A> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.uuid)
-    }
-}
-
-/// Errors while creating or resolving an instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum InstanceError {
-    /// Not registered
-    Unregistered,
-    /// Given the context, the process instance has already completed.
-    Completed,
-    /// The context does not match the process instance.
-    InvalidContext,
 }
 
 /// Asynchronous wait abstraction used for BPMN waiting events.

@@ -49,6 +49,7 @@ impl<C: Fn(&super::Token, V) -> usize, V: Value> Xor<C, V> {
 }
 
 impl<C, V: Value> Gateway for Xor<C, V> {}
+
 impl<const NUM: usize, V: Value> JoinableGateway<NUM, V> for Xor<(), V> {
     type Output = V;
 
@@ -72,6 +73,7 @@ impl<const NUM: usize, V: Value> JoinableGateway<NUM, V> for Xor<(), V> {
         output
     }
 }
+
 impl<V: Value, C: Fn(&super::Token, V) -> usize + Clone + Sync + Send + 'static> SplitableGateway
     for Xor<C, V>
 {
@@ -119,6 +121,7 @@ impl<V: Value, C: Fn(&super::Token, V) -> usize + Clone + Sync + Send + 'static>
 pub struct And;
 
 impl Gateway for And {}
+
 impl SplitableGateway for And {
     fn add_nodes<const NUM: usize>(
         &self,
@@ -139,6 +142,7 @@ impl SplitableGateway for And {
         })
     }
 }
+
 impl<const NUM: usize, V: Value> JoinableGateway<NUM, V> for And
 where
     [V; NUM]: Value,

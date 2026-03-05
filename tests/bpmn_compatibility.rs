@@ -9,8 +9,12 @@ impl Process for MessageTarget {
     type Input = i32;
     type Output = i32;
 
-    fn name(&self) -> &str {
-        "message-target-compat"
+    fn metadata(&self) -> &axum_bpmn::MetaData {
+        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+            "message-target-compat",
+            "A process that demonstrates message targeting.",
+        );
+        &META
     }
 
     fn define(
@@ -28,8 +32,12 @@ impl Process for WaitForMessageProcess {
     type Input = CorrelationKey;
     type Output = i32;
 
-    fn name(&self) -> &str {
-        "wait-for-message-compat"
+    fn metadata(&self) -> &axum_bpmn::MetaData {
+        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+            "wait-for-message-compat",
+            "A process that demonstrates waiting for messages.",
+        );
+        &META
     }
 
     fn define(
@@ -52,8 +60,12 @@ impl Process for ThrowMessageProcess {
     type Input = (CorrelationKey, i32);
     type Output = i32;
 
-    fn name(&self) -> &str {
-        "throw-message-compat"
+    fn metadata(&self) -> &axum_bpmn::MetaData {
+        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+            "throw-message-compat",
+            "A process that demonstrates throwing messages.",
+        );
+        &META
     }
 
     fn define(
@@ -80,8 +92,12 @@ impl Process for ParallelAggregationProcess {
     type Input = i32;
     type Output = [i32; 2];
 
-    fn name(&self) -> &str {
-        "parallel-aggregation-compat"
+    fn metadata(&self) -> &axum_bpmn::MetaData {
+        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+            "parallel-aggregation-compat",
+            "A process that demonstrates parallel aggregation.",
+        );
+        &META
     }
 
     fn define(
@@ -179,5 +195,5 @@ async fn parallel_gateway_join_produces_combined_data_object() {
         .await;
 
     assert_eq!(token.get_last::<[i32; 2]>(), Some([13, 23]));
-    assert_eq!(token.current_task(), "AND Join".to_string());
+    assert_eq!(token.last_step(), Some("AND Join".to_string()));
 }

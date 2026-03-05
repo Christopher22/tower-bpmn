@@ -1,5 +1,5 @@
 use axum_bpmn::{
-    CorrelationKey, IncomingMessage, Message, Process, ProcessBuilder, Runtime, Token,
+    CorrelationKey, IncomingMessage, Message, MetaData, Process, ProcessBuilder, Runtime, Token,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,8 +9,12 @@ impl Process for ExampleProcess {
     type Input = i32;
     type Output = i32;
 
-    fn name(&self) -> &str {
-        "example-process"
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
+            "example-process",
+            "An example process that demonstrates basic BPMN features.",
+        );
+        &META
     }
 
     fn define(
@@ -43,8 +47,12 @@ impl Process for ParallelProcess {
     type Input = i32;
     type Output = [i32; 2];
 
-    fn name(&self) -> &str {
-        "parallel-process"
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
+            "parallel-process",
+            "A process that demonstrates parallel execution.",
+        );
+        &META
     }
 
     fn define(
@@ -69,8 +77,12 @@ impl Process for MessageTarget {
     type Input = i32;
     type Output = i32;
 
-    fn name(&self) -> &str {
-        "message-target"
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
+            "message-target",
+            "A process that demonstrates message targeting.",
+        );
+        &META
     }
 
     fn define(
@@ -88,8 +100,12 @@ impl Process for WaitForMessageProcess {
     type Input = CorrelationKey;
     type Output = i32;
 
-    fn name(&self) -> &str {
-        "wait-for-message"
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
+            "wait-for-message",
+            "A process that demonstrates waiting for messages.",
+        );
+        &META
     }
 
     fn define(
@@ -119,7 +135,7 @@ async fn example_process_runs() {
         .await;
 
     assert_eq!(token.get_last::<i32>(), Some(11));
-    assert_eq!(token.current_task(), "finalize".to_string());
+    assert_eq!(token.last_step(), Some("finalize".to_string()));
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -32,20 +32,15 @@ impl<T> Value for T where
 {
 }
 
-pub(crate) type TokenObserver = Arc<dyn Fn(&Token, &str) + Send + Sync>;
+pub type TokenObserver = Arc<dyn Fn(TokenId, &str) + Send + Sync>;
 
+/// ID of a BPMN token, which is used for tracking token history and visibility across branches in the process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TokenId(Uuid);
 
 impl TokenId {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(Uuid::new_v4())
-    }
-}
-
-impl Default for TokenId {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -69,11 +64,49 @@ impl Entry {
     }
 }
 
+/// A (shared) history of token values, indexed by type and token id, with timestamps for determining the current value at a given place in the process. This is shared between all tokens in the same process instance, allowing them to see each other's values according to their branching history.
+#[derive(Clone)]
+pub struct SharedHistory(Arc<DashMap<TypeId, Vec<Entry>>>, Option<TokenObserver>);
+
+impl std::fmt::Debug for SharedHistory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedHistory").finish_non_exhaustive()
+    }
+}
+
+impl SharedHistory {
+    /// Creates a new shared history with no entries.
+    pub fn new() -> Self {
+        SharedHistory(Arc::new(DashMap::new()), None)
+    }
+
+    /// Register a observer tracking changes.
+    pub fn with_observer(mut self, observer: TokenObserver) -> Self {
+        self.1 = Some(observer);
+        self
+    }
+
+    fn add<V: Value>(&self, token_id: TokenId, place: &str, value: V) {
+        let data_entry = Entry::new(token_id, place, value);
+        match self.0.entry(TypeId::of::<V>()) {
+            dashmap::Entry::Occupied(mut entry) => {
+                entry.get_mut().push(data_entry);
+            }
+            dashmap::Entry::Vacant(entry) => {
+                entry.insert(vec![data_entry]);
+            }
+        }
+
+        if let Some(observer) = &self.1 {
+            observer(token_id, place);
+        }
+    }
+}
+
 /// A BPMN token.
 pub struct Token {
     ids: Vec<TokenId>,
-    shared_history: Arc<DashMap<TypeId, Vec<Entry>>>,
-    observer: Option<TokenObserver>,
+    shared_history: SharedHistory,
 }
 
 impl std::fmt::Debug for Token {
@@ -85,36 +118,20 @@ impl std::fmt::Debug for Token {
 }
 
 impl Token {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(shared_history: SharedHistory) -> Self {
         Self {
             ids: vec![TokenId::new()],
-            shared_history: Arc::new(DashMap::new()),
-            observer: None,
+            shared_history,
         }
     }
 
-    pub(crate) fn with_observer(mut self, observer: TokenObserver) -> Self {
-        self.observer = Some(observer);
-        self
-    }
-
     /// Creates a new token. This is not a copy, but a child.
-    #[allow(clippy::should_implement_trait)]
-    pub fn clone(&self) -> Token {
+    pub fn fork(&self) -> Token {
         let mut ids = self.ids.clone();
         ids.push(TokenId::new());
         Self {
             ids,
             shared_history: self.shared_history.clone(),
-            observer: self.observer.clone(),
-        }
-    }
-
-    pub(crate) fn snapshot(&self) -> Token {
-        Self {
-            ids: self.ids.clone(),
-            shared_history: self.shared_history.clone(),
-            observer: self.observer.clone(),
         }
     }
 
@@ -127,26 +144,16 @@ impl Token {
     }
 
     /// Adds a typed output value for the given step and returns the updated token.
-    pub fn set_output<T: Value, S: Into<String>>(self, step: S, value: T) -> Self {
-        let step_name = step.into();
-        let value = Entry::new(self.id(), step_name.clone(), value);
-        match self.shared_history.entry(TypeId::of::<T>()) {
-            dashmap::Entry::Occupied(mut entry) => {
-                entry.get_mut().push(value);
-            }
-            dashmap::Entry::Vacant(entry) => {
-                entry.insert(vec![value]);
-            }
-        }
-        if let Some(observer) = &self.observer {
-            observer(&self, &step_name);
-        }
+    pub fn set_output<T: Value, S: AsRef<str>>(self, step: S, value: T) -> Self {
+        let step = step.as_ref();
+        self.shared_history.add(self.id(), step, value);
         self
     }
 
     /// Returns the most recent value of type `T` visible in this token branch.
     pub fn get_last<T: Value>(&self) -> Option<T> {
         self.shared_history
+            .0
             .get(&TypeId::of::<T>())
             .and_then(|entries| {
                 entries
@@ -163,8 +170,10 @@ impl Token {
             })
     }
 
-    pub(crate) fn current_task_name(&self) -> Option<String> {
+    /// Returns the name of the last step finished by this token.
+    pub fn last_step(&self) -> Option<String> {
         self.shared_history
+            .0
             .iter()
             .flat_map(|typed_entries| {
                 typed_entries
@@ -186,3 +195,28 @@ impl PartialEq for Token {
 }
 
 impl Eq for Token {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_history_returns_latest_value_and_task() {
+        let token = Token::new(SharedHistory::new())
+            .set_output("step-a", 1_i32)
+            .set_output("step-b", 2_i32)
+            .set_output("step-c", 3_i32);
+
+        assert_eq!(token.get_last::<i32>(), Some(3));
+        assert_eq!(token.last_step(), Some("step-c".into()));
+    }
+
+    #[test]
+    fn token_child_branch_keeps_parent_history_visible() {
+        let root = Token::new(SharedHistory::new()).set_output("root", 5_i32);
+        let child = root.fork().set_output("child", 9_i32);
+
+        assert_eq!(root.get_last::<i32>(), Some(5));
+        assert_eq!(child.get_last::<i32>(), Some(9));
+    }
+}

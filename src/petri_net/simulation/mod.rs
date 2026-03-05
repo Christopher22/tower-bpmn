@@ -88,16 +88,17 @@ impl<E: Executor<()>, S: CompetingStrategy, A: Callable<C::State>, C: Color>
 {
     /// Run all enabled transitions and return whether there are no more tasks running.
     fn run_all_transactions(&mut self) -> bool {
-        for enabled_transaction in
-            EnabledTransitions::find_all(self.petri_net.as_ref(), self.marking.clone())
-        {
-            let transition = match enabled_transaction {
-                EnabledTransitions::Independent(transition) => transition,
-                EnabledTransitions::Competing(transitions) => {
-                    self.competing_strategy.select(transitions)
-                }
-            };
+        let enabled_transactions: Vec<_> =
+            EnabledTransitions::find_all(self.petri_net.as_ref(), &self.marking)
+                .map(|enabled_transaction| match enabled_transaction {
+                    EnabledTransitions::Independent(transition) => transition,
+                    EnabledTransitions::Competing(transitions) => {
+                        self.competing_strategy.select(transitions)
+                    }
+                })
+                .collect();
 
+        for transition in enabled_transactions {
             if let Some(state) = C::update_input(&transition, &mut self.marking) {
                 self.tasks.spawn(transition, state);
             }

@@ -10,8 +10,9 @@ impl Process for DummyProcess {
     type Input = i32;
     type Output = i32;
 
-    fn name(&self) -> &str {
-        "dummy"
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new("dummy", "A dummy process for testing.");
+        &META
     }
 
     fn define(
@@ -29,8 +30,12 @@ impl Process for XorUnitProcess {
     type Input = i32;
     type Output = i32;
 
-    fn name(&self) -> &str {
-        "xor-unit"
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
+            "xor-unit",
+            "A process that demonstrates XOR splitting and joining.",
+        );
+        &META
     }
 
     fn define(
@@ -61,8 +66,12 @@ impl Process for MessageTargetProcess {
     type Input = i32;
     type Output = i32;
 
-    fn name(&self) -> &str {
-        "message-target-unit"
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
+            "message-target-unit",
+            "A process that demonstrates message targeting.",
+        );
+        &META
     }
 
     fn define(
@@ -80,8 +89,12 @@ impl Process for ThrowingProcess {
     type Input = (CorrelationKey, i32);
     type Output = i32;
 
-    fn name(&self) -> &str {
-        "throwing-unit"
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
+            "throwing-unit",
+            "A process that demonstrates throwing messages.",
+        );
+        &META
     }
 
     fn define(
@@ -105,8 +118,12 @@ impl Process for WaitingProcess {
     type Input = CorrelationKey;
     type Output = i32;
 
-    fn name(&self) -> &str {
-        "waiting-unit"
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
+            "waiting-unit",
+            "A process that demonstrates waiting for messages.",
+        );
+        &META
     }
 
     fn define(
@@ -120,26 +137,6 @@ impl Process for WaitingProcess {
             ))
             .then("double", |_token, value| value * 2)
     }
-}
-
-#[test]
-fn token_history_returns_latest_value_and_task() {
-    let token = Token::new()
-        .set_output("step-a", 1_i32)
-        .set_output("step-b", 2_i32)
-        .set_output("step-c", 3_i32);
-
-    assert_eq!(token.get_last::<i32>(), Some(3));
-    assert_eq!(token.current_task(), "step-c".to_string());
-}
-
-#[test]
-fn token_child_branch_keeps_parent_history_visible() {
-    let root = Token::new().set_output("root", 5_i32);
-    let child = root.clone().set_output("child", 9_i32);
-
-    assert_eq!(root.get_last::<i32>(), Some(5));
-    assert_eq!(child.get_last::<i32>(), Some(9));
 }
 
 #[test]
@@ -165,7 +162,7 @@ async fn timer_waitable_with_past_time_resolves_immediately() {
     let timer = Timer("timer".into());
     let output = <Timer as Waitable<DummyProcess, DateTime<Utc>, ()>>::wait_for(
         &timer,
-        &Token::new(),
+        &Token::new(SharedHistory::new()),
         Utc::now() - Duration::seconds(1),
     )
     .await;
@@ -180,7 +177,7 @@ async fn timer_waitable_with_future_time_resolves_with_current_semantics() {
         TokioDuration::from_millis(50),
         <Timer as Waitable<DummyProcess, DateTime<Utc>, ()>>::wait_for(
             &timer,
-            &Token::new(),
+            &Token::new(SharedHistory::new()),
             Utc::now() + Duration::milliseconds(30),
         ),
     )
@@ -206,7 +203,9 @@ async fn incoming_message_waitable_returns_payload() {
     let key = CorrelationKey::new();
     messages.send(key, 77_i32);
 
-    let value = waitable.wait_for(&Token::new(), key).await;
+    let value = waitable
+        .wait_for(&Token::new(SharedHistory::new()), key)
+        .await;
     assert_eq!(value, 77);
 }
 
@@ -219,7 +218,7 @@ async fn incoming_message_waitable_ignores_other_correlation_keys() {
     let expected_key = CorrelationKey::new();
     let other_key = CorrelationKey::new();
 
-    let wait_future = waitable.wait_for(&Token::new(), expected_key);
+    let wait_future = waitable.wait_for(&Token::new(SharedHistory::new()), expected_key);
     messages.send(other_key, 11_i32);
     messages.send(expected_key, 88_i32);
 

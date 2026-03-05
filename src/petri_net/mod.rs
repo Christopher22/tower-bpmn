@@ -17,14 +17,14 @@ pub use self::store::{Entry, Id, Store};
 #[derive(Debug, Clone)]
 pub struct Place<C: Color> {
     /// The name of the place.
-    pub name: String,
+    pub name: C::Id,
     /// The initial number of tokens in the place.
-    pub initial_tokens: C,
+    initial_tokens: C,
 }
 
 impl<C: Color> Place<C> {
     /// Create a new place with the given name and initial tokens.
-    pub fn new(name: impl Into<String>, initial_tokens: C) -> Self {
+    pub fn new(name: impl Into<C::Id>, initial_tokens: C) -> Self {
         Place {
             name: name.into(),
             initial_tokens,
@@ -218,12 +218,12 @@ pub enum EnabledTransitions<'a, A, C: Color> {
 impl<A, C: Color> EnabledTransitions<'_, A, C> {
     pub fn find_all<'a>(
         petri_net: &'a PetriNet<A, C>,
-        marking: Marking<C>,
+        marking: &Marking<C>,
     ) -> impl ExactSizeIterator<Item = EnabledTransitions<'a, A, C>> {
         let mut transitions = std::collections::HashMap::new();
 
         for transition in petri_net.transitions() {
-            if C::is_transition_enabled(&transition, &marking) {
+            if C::is_transition_enabled(&transition, marking) {
                 let inputs: BTreeSet<Id<Place<C>>> =
                     transition.input.iter().map(|arc| arc.target).collect();
                 transitions
@@ -307,7 +307,7 @@ mod tests {
         let mut petri_net = PetriNet::<fn(), usize>::default();
         petri_net.add_connected_places(Place::new("Start", 0), Place::new("End", 0), || {});
 
-        let enabled: Vec<_> = EnabledTransitions::find_all(&petri_net, Marking::empty()).collect();
+        let enabled: Vec<_> = EnabledTransitions::find_all(&petri_net, &Marking::empty()).collect();
         assert!(enabled.is_empty());
     }
 
@@ -329,7 +329,7 @@ mod tests {
         assert!(petri_net.connect_transition(trans_p1_p3, p3, UsizeWeight::DEFAULT));
 
         let enabled_transitions: Vec<_> =
-            EnabledTransitions::find_all(&petri_net, petri_net.initial_marking()).collect();
+            EnabledTransitions::find_all(&petri_net, &petri_net.initial_marking()).collect();
 
         assert_eq!(enabled_transitions.len(), 2);
         assert!(

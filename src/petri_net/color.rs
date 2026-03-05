@@ -11,6 +11,9 @@ pub trait Color: 'static + Eq + Sized + Default + std::fmt::Debug + Clone {
     /// The type used for the weight of arcs.
     type Weight: std::fmt::Debug + Default + Send;
 
+    /// The type used for identifying places.
+    type Id: std::fmt::Debug;
+
     /// Check if the transition can fire given the marking.
     fn is_transition_enabled<A>(transition: &Transition<A, Self>, marking: &Marking<Self>) -> bool;
 
@@ -33,6 +36,7 @@ impl Color for usize {
 
     type State = ();
     type Weight = UsizeWeight;
+    type Id = String;
 
     fn is_transition_enabled<A>(transition: &Transition<A, Self>, marking: &Marking<Self>) -> bool {
         for arc in &transition.input {

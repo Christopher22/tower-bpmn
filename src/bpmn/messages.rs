@@ -7,9 +7,7 @@ use std::{
 use tokio::sync::broadcast::{Receiver, Sender};
 use uuid::Uuid;
 
-use crate::Process;
-
-use super::Value;
+use crate::{Process, Value};
 
 #[derive(
     Debug,
