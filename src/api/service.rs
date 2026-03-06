@@ -11,15 +11,15 @@ use http_body::Body;
 use parking_lot::RwLock;
 use tower_service::Service;
 
-use crate::{ExtendedExecutor, InstanceId, Runtime, RuntimeInstance};
+use crate::{ExtendedExecutor, Runtime};
 
 use super::{
     error::ApiError,
     openapi,
     response::{
-        AcceptedResponse, ProcessListResponse, SendMessageRequest, StartInstanceRequest,
-        StartInstanceResponse, decode_json_payload, json_response, parse_json_body,
-        process_instances_response,
+        AcceptedResponse, ProcessListResponse, ProcessMetadataResponse, SendMessageRequest,
+        StartInstanceRequest, StartInstanceResponse, decode_json_payload, json_response,
+        parse_json_body, process_instances_response,
     },
 };
 
@@ -70,15 +70,34 @@ where
                 .collect();
 
             let response = match (method.as_str(), segments.as_slice()) {
-                ("GET", []) => json_response(StatusCode::OK, &openapi()),
+                ("GET", []) => {
+                    let runtime = runtime.read();
+                    json_response(StatusCode::OK, &openapi(&runtime))
+                }
                 ("GET", ["processes"]) => {
                     let runtime = runtime.read();
                     json_response(
                         StatusCode::OK,
                         &ProcessListResponse {
-                            processes: runtime.registered_processes(),
+                            processes: runtime
+                                .registered_processes()
+                                .map(|value| value.meta_data.name.to_string())
+                                .collect(),
                         },
                     )
+                }
+                ("GET", ["processes", process_name]) => {
+                    let runtime = runtime.read();
+                    match runtime
+                        .registered_processes()
+                        .find(|value| value.meta_data.name == *process_name)
+                        .map(|process| process.meta_data.clone())
+                    {
+                        Some(process) => {
+                            json_response(StatusCode::OK, &ProcessMetadataResponse { process })
+                        }
+                        None => ApiError::not_found("unknown process").into_response(),
+                    }
                 }
                 ("POST", ["processes", process_name, "instances"]) => {
                     let request: StartInstanceRequest =
@@ -100,31 +119,11 @@ where
                     let runtime = runtime.read();
                     if !runtime
                         .registered_processes()
-                        .iter()
-                        .any(|p| p == process_name)
+                        .any(|p| p.meta_data.name == *process_name)
                     {
                         ApiError::not_found("unknown process").into_response()
                     } else {
                         process_instances_response(&runtime, process_name)
-                    }
-                }
-                ("GET", ["instances", instance_id]) => {
-                    let instance_id: InstanceId = match instance_id.parse() {
-                        Ok(value) => value,
-                        Err(err) => {
-                            return Ok(ApiError::bad_request(format!(
-                                "invalid instance id: {err}"
-                            ))
-                            .into_response());
-                        }
-                    };
-                    let runtime = runtime.read();
-                    match runtime.instances.get(instance_id) {
-                        Some(instance) => {
-                            let instance: &RuntimeInstance = &instance;
-                            json_response(StatusCode::OK, instance)
-                        }
-                        None => ApiError::not_found("instance not found").into_response(),
                     }
                 }
                 ("POST", ["processes", process_name, "messages"]) => {

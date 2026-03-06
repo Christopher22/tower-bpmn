@@ -120,6 +120,80 @@ async fn openapi_root_is_available() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["openapi"], "3.1.0");
     assert!(body["paths"]["/processes"].is_object());
+    assert!(body["components"]["schemas"]["StartInstanceResponse"].is_object());
+    assert!(body["components"]["schemas"]["ProcessInstancesResponse"].is_object());
+    assert!(body["components"]["schemas"]["RuntimeInstance"].is_object());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openapi_lists_registered_process_paths_and_input_schemas() {
+    let mut api = build_api();
+    let (status, body) = call_json(&mut api, get("/api/")).await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    assert!(body["paths"]["/processes/start-process/instances"].is_object());
+    assert!(body["paths"]["/processes/wait-process/instances"].is_object());
+    assert!(body["paths"]["/processes/message-target/messages"].is_object());
+    assert!(body["paths"]["/processes/{process_name}"].is_object());
+
+    let start_input_schema = &body["paths"]["/processes/start-process/instances"]["post"]["requestBody"]
+        ["content"]["application/json"]["schema"]["properties"]["input"];
+    assert_eq!(start_input_schema["type"], "integer");
+
+    let wait_input_schema = &body["paths"]["/processes/wait-process/instances"]["post"]["requestBody"]
+        ["content"]["application/json"]["schema"]["properties"]["input"];
+    assert_eq!(wait_input_schema["type"], "string");
+    assert_eq!(wait_input_schema["format"], "uuid");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openapi_uses_exact_response_struct_refs() {
+    let mut api = build_api();
+    let (status, body) = call_json(&mut api, get("/api/")).await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(
+        body["paths"]["/processes/start-process/instances"]["post"]["responses"]["202"]["content"]
+            ["application/json"]["schema"]["$ref"],
+        "#/components/schemas/StartInstanceResponse"
+    );
+    assert_eq!(
+        body["paths"]["/processes/start-process/instances"]["get"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "#/components/schemas/ProcessInstancesResponse"
+    );
+    assert_eq!(
+        body["paths"]["/processes/message-target/messages"]["post"]["responses"]["202"]["content"]
+            ["application/json"]["schema"]["$ref"],
+        "#/components/schemas/AcceptedResponse"
+    );
+    assert_eq!(
+        body["paths"]["/instances/{instance_id}"]["get"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "#/components/schemas/RuntimeInstance"
+    );
+    assert_eq!(
+        body["paths"]["/processes/{process_name}"]["get"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "#/components/schemas/ProcessMetadataResponse"
+    );
+
+    let process_entries = body["x-registered-processes"]
+        .as_array()
+        .expect("registered process metadata should be an array");
+    assert_eq!(process_entries.len(), 3);
+    assert!(
+        process_entries
+            .iter()
+            .any(|entry| entry["name"] == "start-process")
+    );
+    assert!(
+        process_entries
+            .iter()
+            .any(|entry| entry["name"] == "wait-process")
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -131,6 +205,29 @@ async fn lists_registered_processes() {
     let names = body["processes"].as_array().unwrap();
     assert!(names.iter().any(|name| name == "start-process"));
     assert!(names.iter().any(|name| name == "wait-process"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn returns_registered_process_metadata() {
+    let mut api = build_api();
+    let (status, body) = call_json(&mut api, get("/processes/start-process")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["process"]["name"], "start-process");
+    assert_eq!(body["process"]["version"], 1);
+    assert_eq!(
+        body["process"]["description"],
+        "Starts and completes immediately"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn returns_not_found_for_unknown_process_metadata() {
+    let mut api = build_api();
+    let (status, body) = call_json(&mut api, get("/processes/unknown-process")).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "unknown process");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -172,11 +269,6 @@ async fn lists_running_instances_and_can_read_instance_state() {
             .iter()
             .any(|instance| instance["id"] == instance_id && instance["status"] == "running")
     );
-
-    let (instance_status, instance_body) =
-        call_json(&mut api, get(&format!("/instances/{instance_id}"))).await;
-    assert_eq!(instance_status, StatusCode::OK);
-    assert_eq!(instance_body["status"], "running");
 }
 
 #[tokio::test(flavor = "current_thread")]

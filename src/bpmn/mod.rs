@@ -16,8 +16,8 @@ use std::{borrow::Cow, ops::IndexMut};
 use crate::executor::Executor;
 
 pub use self::engine::{
-    Instance, InstanceError, InstanceId, InstanceStatus, ProcessError, Runtime, RuntimeApiError,
-    RuntimeInstance, SharedHistory, Token, TokenId, Value,
+    Instance, InstanceError, InstanceId, InstanceStatus, ProcessError, RegisteredProcess, Runtime,
+    RuntimeApiError, RuntimeInstance, SharedHistory, Token, TokenId, Value,
 };
 pub use self::messages::{CorrelationKey, Message, MessageManager, ProcessMessages, SendError};
 pub use self::process::{MetaData, Process};
@@ -121,6 +121,16 @@ pub(crate) enum Step {
     And(usize),
     Task(String, StepTaskFn),
     Waitable(String, StepWaitFn),
+}
+
+impl std::fmt::Debug for Step {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::And(arg0) => f.debug_tuple("And").field(arg0).finish(),
+            Self::Task(_, _) => f.debug_tuple("Task").finish_non_exhaustive(),
+            Self::Waitable(_, _) => f.debug_tuple("Waitable").finish_non_exhaustive(),
+        }
+    }
 }
 
 type StepTaskFn = Box<dyn Fn(&str, Vec<Token>) -> Vec<Token> + Send + Sync>;

@@ -20,7 +20,7 @@ pub trait Process: 'static + Sized {
 }
 
 /// Meta data for a BPMN process definition.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 pub struct MetaData {
     /// Unique name of the process definition.
     pub name: Cow<'static, str>,
