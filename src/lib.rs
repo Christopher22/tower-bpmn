@@ -15,9 +15,11 @@
 
 // Tower-native runtime API service and OpenAPI generation.
 // pub mod api;
+mod api;
 mod bpmn;
 /// Executor backends for running asynchronous process tasks.
 pub mod executor;
 pub(crate) mod petri_net;
 
+pub use api::Api;
 pub use bpmn::*;

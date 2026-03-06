@@ -16,19 +16,22 @@ use std::{borrow::Cow, ops::IndexMut};
 use crate::executor::Executor;
 
 pub use self::engine::{
-    Instance, InstanceError, InstanceId, InstanceStatus, Runtime, RuntimeInstance, SharedHistory,
-    Token, TokenId, Value,
+    Instance, InstanceError, InstanceId, InstanceStatus, ProcessError, Runtime, RuntimeApiError,
+    RuntimeInstance, SharedHistory, Token, TokenId, Value,
 };
 pub use self::messages::{CorrelationKey, Message, MessageManager, ProcessMessages, SendError};
 pub use self::process::{MetaData, Process};
 
 /// Executor abstraction required by the BPMN runtime.
 pub trait ExtendedExecutor:
-    Send + Executor<()> + Executor<crate::petri_net::Marking<State>>
+    'static + Send + Executor<()> + Executor<crate::petri_net::Marking<State>>
 {
 }
 
-impl<T: Send + Executor<()> + Executor<crate::petri_net::Marking<State>>> ExtendedExecutor for T {}
+impl<T: 'static + Send + Executor<()> + Executor<crate::petri_net::Marking<State>>> ExtendedExecutor
+    for T
+{
+}
 
 /// A "color" for tokens in a BPMN process. This is used to track the state of the process and determine which tasks are enabled within a correpsonding PetriNet.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -154,6 +157,7 @@ pub(crate) const START_NAME: &'static str = "Start";
 
 /// Builder used to define BPMN processes declaratively.
 pub struct ProcessBuilder<P: Process, E: Value> {
+    meta_data: MetaData,
     process: std::marker::PhantomData<fn() -> P>,
     input_type: std::marker::PhantomData<fn() -> E>,
     petri_net: Arc<RwLock<crate::petri_net::PetriNet<Step, State>>>,
@@ -170,11 +174,12 @@ impl<P: Process, E: Value> std::fmt::Debug for ProcessBuilder<P, E> {
 }
 
 impl<P: Process, E: Value> ProcessBuilder<P, E> {
-    pub(crate) fn new(message_manager: MessageManager) -> Self {
+    pub(crate) fn new(meta_data: MetaData, message_manager: MessageManager) -> Self {
         let mut petri_net = crate::petri_net::PetriNet::default();
         let current_place =
             petri_net.add_place(crate::petri_net::Place::new(START_NAME, State::Inactive));
         ProcessBuilder {
+            meta_data,
             process: std::marker::PhantomData,
             input_type: std::marker::PhantomData,
             petri_net: Arc::new(RwLock::new(petri_net)),
@@ -246,6 +251,7 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
             start_place: self.start_place,
             message_manager: self.message_manager,
             used_names: self.used_names,
+            meta_data: self.meta_data,
         }
     }
 
@@ -274,6 +280,7 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
             start_place: self.start_place,
             message_manager: self.message_manager,
             used_names: self.used_names,
+            meta_data: self.meta_data,
         }
     }
 
@@ -292,6 +299,7 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
                 start_place: self.start_place,
                 message_manager: self.message_manager.clone(),
                 used_names: self.used_names.clone(),
+                meta_data: self.meta_data.clone(),
             })
     }
 
@@ -329,6 +337,7 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
             start_place: self.start_place,
             message_manager: self.message_manager,
             used_names: self.used_names,
+            meta_data: self.meta_data,
         }
     }
 
@@ -337,6 +346,8 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
         gateway: G,
         parts: [ProcessBuilder<P, E>; NUM],
     ) -> ProcessBuilder<P, G::Output> {
+        assert_ne!(NUM, 0, "Cannot join zero branches");
+
         let first = &parts[0];
         let used_names = parts
             .iter()
@@ -349,18 +360,20 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
                 "All process parts must belong to the same process definition"
             );
         }
-
         let current_places = parts.each_ref().map(|part| part.current_place);
         let current_place = gateway.add_nodes(first.petri_net.write(), current_places);
 
+        // Deconstruct the array and discard everything except the first element.
+        let first = parts.into_iter().next().unwrap();
         ProcessBuilder {
             process: std::marker::PhantomData,
             input_type: std::marker::PhantomData,
-            petri_net: first.petri_net.clone(),
+            petri_net: first.petri_net,
             start_place: first.start_place,
             current_place,
-            message_manager: first.message_manager.clone(),
+            message_manager: first.message_manager,
             used_names,
+            meta_data: first.meta_data,
         }
     }
 }
