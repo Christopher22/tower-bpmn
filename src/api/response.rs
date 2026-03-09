@@ -5,10 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::{
-    CorrelationKey, ExtendedExecutor, InstanceId, InstanceStatus, MetaData, Runtime,
-    RuntimeInstance,
-};
+use crate::{CorrelationKey, ExtendedExecutor, Instance, InstanceId, MetaData, Runtime};
 
 use super::error::ApiError;
 
@@ -50,8 +47,8 @@ pub(super) struct ProcessMetadataResponse {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub(super) struct ProcessInstancesResponse {
-    pub(super) instances: Vec<RuntimeInstance>,
+pub(super) struct ProcessInstancesResponse<'a, E: ExtendedExecutor> {
+    pub(super) instances: Vec<&'a Instance<E>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -91,28 +88,6 @@ pub(super) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Resp
         .header(CONTENT_TYPE, "application/json")
         .body(body)
         .unwrap_or_else(|_| Response::new("{\"error\":\"failed to build response\"}".to_string()))
-}
-
-pub(super) fn process_instances_response<E: ExtendedExecutor>(
-    runtime: &Runtime<E>,
-    process_name: &str,
-) -> Response<String> {
-    let instances: Vec<RuntimeInstance> = runtime
-        .instances
-        .iter()
-        .filter_map(|entry| {
-            let instance: &RuntimeInstance = &entry;
-            if instance.process == process_name
-                && matches!(instance.status, InstanceStatus::Running)
-            {
-                Some(instance.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    json_response(StatusCode::OK, &ProcessInstancesResponse { instances })
 }
 
 fn schema_for<T: JsonSchema>() -> serde_json::Value {
@@ -431,11 +406,7 @@ pub fn openapi<E: ExtendedExecutor>(runtime: &Runtime<E>) -> serde_json::Value {
             ),
             (
                 "ProcessInstancesResponse".to_string(),
-                schema_for::<ProcessInstancesResponse>(),
-            ),
-            (
-                "RuntimeInstance".to_string(),
-                schema_for::<RuntimeInstance>(),
+                schema_for::<ProcessInstancesResponse<E>>(),
             ),
             ("ErrorBody".to_string(), schema_for::<ErrorBody>()),
         ]

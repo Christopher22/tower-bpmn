@@ -1,6 +1,6 @@
 use http::{Response, StatusCode};
 
-use crate::{InstanceError, RuntimeApiError, SendError};
+use crate::{InstanceSpawnError, RuntimeApiError, SendError};
 
 use super::response::{ErrorBody, json_response};
 
@@ -32,11 +32,11 @@ impl ApiError {
         }
     }
 
-    fn from_instance_error(error: InstanceError) -> Self {
+    fn from_instance_error(error: InstanceSpawnError) -> Self {
         match error {
-            InstanceError::Unregistered => Self::not_found("unknown process"),
-            InstanceError::Completed => Self::conflict("instance already completed"),
-            InstanceError::InvalidContext => Self::bad_request("invalid process context"),
+            InstanceSpawnError::Unregistered => Self::not_found("unknown process"),
+            InstanceSpawnError::Completed => Self::conflict("instance already completed"),
+            InstanceSpawnError::InvalidContext => Self::bad_request("invalid process context"),
         }
     }
 

@@ -143,7 +143,7 @@ impl Process for WaitingProcess {
 fn runtime_returns_unregistered_error_for_unknown_process() {
     let runtime = Runtime::new(crate::executor::TokioExecutor);
     let result = runtime.run(DummyProcess, 1);
-    assert!(matches!(result, Err(InstanceError::Unregistered)));
+    assert!(matches!(result, Err(InstanceSpawnError::Unregistered)));
 }
 
 #[test]
@@ -239,15 +239,24 @@ async fn throw_message_and_wait_for_message_roundtrip() {
         .expect("wait process registration must work");
 
     let key = CorrelationKey::new();
-    let throw_instance = runtime
+    let throw_instance: InstanceId = runtime
         .run(ThrowingProcess, (key, 12))
         .expect("throw instance must start");
     let wait_instance = runtime
         .run(WaitingProcess, key)
         .expect("wait instance must start");
 
-    let throw_token = throw_instance.wait_for_completion().await;
-    let wait_token = wait_instance.wait_for_completion().await;
+    let throw_token = runtime
+        .wait_for_completion(&ThrowingProcess, throw_instance)
+        .await
+        .expect("process registered")
+        .expect("process running");
+
+    let wait_token = runtime
+        .wait_for_completion(&WaitingProcess, wait_instance)
+        .await
+        .expect("process registered")
+        .expect("process running");
 
     assert_eq!(throw_token.get_last::<i32>(), Some(12));
     assert_eq!(wait_token.get_last::<i32>(), Some(24));

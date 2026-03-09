@@ -1,6 +1,7 @@
 use std::{
     convert::Infallible,
     future::Future,
+    ops::Deref,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -17,9 +18,9 @@ use super::{
     error::ApiError,
     openapi,
     response::{
-        AcceptedResponse, ProcessListResponse, ProcessMetadataResponse, SendMessageRequest,
-        StartInstanceRequest, StartInstanceResponse, decode_json_payload, json_response,
-        parse_json_body, process_instances_response,
+        AcceptedResponse, ProcessInstancesResponse, ProcessListResponse, ProcessMetadataResponse,
+        SendMessageRequest, StartInstanceRequest, StartInstanceResponse, decode_json_payload,
+        json_response, parse_json_body,
     },
 };
 
@@ -117,13 +118,23 @@ where
                 }
                 ("GET", ["processes", process_name, "instances"]) => {
                     let runtime = runtime.read();
-                    if !runtime
-                        .registered_processes()
-                        .any(|p| p.meta_data.name == *process_name)
+                    match runtime
+                        .instances()
+                        .find(|p| p.registered_process.meta_data.name == *process_name)
                     {
-                        ApiError::not_found("unknown process").into_response()
-                    } else {
-                        process_instances_response(&runtime, process_name)
+                        Some(instances) => {
+                            let instances: Vec<_> = instances.iter().collect();
+                            json_response(
+                                StatusCode::OK,
+                                &ProcessInstancesResponse {
+                                    instances: instances
+                                        .iter()
+                                        .map(|instance| instance.deref())
+                                        .collect(),
+                                },
+                            )
+                        }
+                        None => ApiError::not_found("unknown process").into_response(),
                     }
                 }
                 ("POST", ["processes", process_name, "messages"]) => {

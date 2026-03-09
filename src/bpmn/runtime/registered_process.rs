@@ -1,25 +1,32 @@
 use std::{any::TypeId, sync::Arc};
 
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 
 use crate::{
-    CorrelationKey, ExtendedExecutor, InstanceError, InstanceId, Message, MetaData, Process,
+    CorrelationKey, ExtendedExecutor, InstanceId, InstanceSpawnError, Message, MetaData, Process,
     ProcessBuilder, ProcessError, Runtime, SendError, SharedHistory, State, Step, Token, Value,
     petri_net::{FirstCompetingStrategy, PetriNet, Simulation},
 };
 
 /// A registered process definition.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct RegisteredProcess<E: ExtendedExecutor> {
     /// Meta data of the registered process.
     pub meta_data: MetaData,
     /// Schema of the value which could be passed to this process to start it.
     pub input_schema: JsonValue,
+    #[serde(skip)]
     pub(crate) petri_net: Arc<PetriNet<Step, State>>,
+    #[serde(skip)]
     pub(crate) start: crate::petri_net::Id<crate::petri_net::Place<State>>,
+    #[serde(skip)]
     pub(crate) end: crate::petri_net::Id<crate::petri_net::Place<State>>,
+    #[serde(skip)]
     pub(crate) process_type: TypeId,
+    #[serde(skip)]
     pub(crate) input_type: TypeId,
+    #[serde(skip)]
     dynamic_api: DynamicCaller<E>,
 }
 
@@ -45,6 +52,11 @@ impl<E: ExtendedExecutor> RegisteredProcess<E> {
         }
     }
 
+    /// Checks if the process matches the given type.
+    pub fn matches<P: Process>(&self, process: &P) -> bool {
+        self.process_type == TypeId::of::<P>() && &self.meta_data == process.metadata()
+    }
+
     /// Create a new simulation for this process with the given input. The simulation will be initialized with the input token at the start place of the process.
     pub(crate) fn instantiate<A: ExtendedExecutor, V: Value>(
         &self,
@@ -62,11 +74,6 @@ impl<E: ExtendedExecutor> RegisteredProcess<E> {
             Simulation::new(executor, self.petri_net.clone(), FirstCompetingStrategy);
         simulation[self.start] = State::Completed(token);
         simulation
-    }
-
-    /// Get the end place of the process, which is used for querying the final state of the process instance.
-    pub(crate) fn end_place(&self) -> &crate::petri_net::Place<State> {
-        &self.petri_net[self.end]
     }
 
     /// Start the process by its name.
@@ -143,7 +150,6 @@ impl<E: ExtendedExecutor> DynamicCaller<E> {
                     .map_err(|err| RuntimeApiError::InvalidPayload(err.to_string()))?;
                 runtime
                     .run(process_for_start.clone(), value)
-                    .map(|instance| instance.id)
                     .map_err(RuntimeApiError::Instance)
             }),
             send_message: Arc::new(
@@ -177,7 +183,7 @@ pub enum RuntimeApiError {
     /// JSON payload could not be deserialized.
     InvalidPayload(String),
     /// Instance startup failed.
-    Instance(InstanceError),
+    Instance(InstanceSpawnError),
     /// Message dispatch failed.
     Send(SendError),
 }

@@ -1,5 +1,8 @@
 use std::future::Future;
 
+use schemars::JsonSchema;
+use serde::Serialize;
+
 /// A backend executor for running tasks.
 pub trait Executor<T: 'static + Send>: Clone {
     /// The handle type for spawned tasks.
@@ -32,7 +35,7 @@ impl Executor<()> for futures::executor::LocalSpawner {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 /// Executor implementation backed by `tokio::task::spawn`.
 pub struct TokioExecutor;
 impl<T: 'static + Send> Executor<T> for TokioExecutor {

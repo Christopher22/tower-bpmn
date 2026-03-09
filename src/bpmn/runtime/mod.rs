@@ -1,30 +1,23 @@
+mod instance;
 mod instances;
 mod registered_process;
 mod token;
 
 use serde_json::Value as JsonValue;
-use std::{any::TypeId, collections::HashMap, hash::Hash, sync::Arc};
+use std::{any::TypeId, collections::HashMap};
 
 use crate::{ExtendedExecutor, Message, MessageManager, Process, ProcessBuilder, SendError};
 
-pub use instances::{Instance, InstanceId, InstanceStatus, Instances, RuntimeInstance};
+pub use instance::{Handle, Instance, InstanceId, InstanceNotRunning, InstanceStatus};
+pub use instances::{InstanceSpawnError, Instances};
 pub use registered_process::{RegisteredProcess, RuntimeApiError};
 pub use token::{SharedHistory, Token, TokenId, Value};
 
-pub(self) trait Observer {
-    fn report_start(&self, instance_id: InstanceId, process: String, history: SharedHistory);
-    fn report_task_completed(&self, instance_id: InstanceId, token_id: TokenId, task: &str);
-    fn report_end(&self, instance_id: InstanceId);
-    fn report_stop(&self, instance_id: InstanceId);
-}
-
 /// Runtime that stores process definitions and starts process instances.
 pub struct Runtime<E: ExtendedExecutor> {
-    pub(crate) executor: E,
-    registered_processes: HashMap<String, RegisteredProcess<E>>,
+    registered_processes: HashMap<String, Instances<E>>,
     message_manager: MessageManager,
-    /// Currently running instances tracked by the runtime, which can be queried for their status and history.
-    pub instances: Instances,
+    executor: E,
 }
 
 impl<E: ExtendedExecutor> std::fmt::Debug for Runtime<E> {
@@ -39,10 +32,9 @@ impl<E: ExtendedExecutor> Runtime<E> {
     /// Creates a new runtime with the provided executor backend.
     pub fn new(executor: E) -> Self {
         Runtime {
-            executor,
             registered_processes: HashMap::new(),
             message_manager: MessageManager::new(),
-            instances: Instances::new(),
+            executor,
         }
     }
 
@@ -64,13 +56,39 @@ impl<E: ExtendedExecutor> Runtime<E> {
             RegisteredProcess::try_from((process.define(builder), dynamic_api))?
         };
 
-        self.registered_processes.insert(process_name, raw_process);
+        self.registered_processes.insert(
+            process_name,
+            Instances::new(raw_process, self.executor.clone()),
+        );
         Ok(())
     }
 
-    /// Return names of all registered processes.
+    /// Return all registered processes.
     pub fn registered_processes(&self) -> impl Iterator<Item = &RegisteredProcess<E>> {
+        self.registered_processes
+            .values()
+            .map(|value| &value.registered_process)
+    }
+
+    /// Return all tracked process instances.
+    pub fn instances(&self) -> impl Iterator<Item = &Instances<E>> {
         self.registered_processes.values()
+    }
+
+    /// Wait for a specific instance to complete and return the final context. Returns None if the instance is not found, or Some(Err) if the instance is not running.
+    pub async fn wait_for_completion<P: Process>(
+        &self,
+        process: &P,
+        instance_id: InstanceId,
+    ) -> Option<Result<Token, InstanceNotRunning>> {
+        match self
+            .registered_processes
+            .values()
+            .find(|instances| instances.registered_process.matches(process))
+        {
+            Some(instances) => instances.wait_for_completion(instance_id).await,
+            None => None,
+        }
     }
 
     /// Starts a registered process by its name using JSON input.
@@ -83,7 +101,7 @@ impl<E: ExtendedExecutor> Runtime<E> {
             .registered_processes
             .get(process_name)
             .ok_or(RuntimeApiError::Unregistered)?;
-        process.run_dynamic(self, input)
+        process.registered_process.run_dynamic(self, input)
     }
 
     /// Sends a message to a registered process by name using JSON payload.
@@ -97,7 +115,9 @@ impl<E: ExtendedExecutor> Runtime<E> {
             .registered_processes
             .get(process_name)
             .ok_or(RuntimeApiError::Unregistered)?;
-        process.send_message_dynamic(self, correlation_key, payload)
+        process
+            .registered_process
+            .send_message_dynamic(self, correlation_key, payload)
     }
 
     /// Run a process with the given input. The process will be executed in the background, and an instance handle will be returned for waiting for completion or resuming later.
@@ -106,41 +126,18 @@ impl<E: ExtendedExecutor> Runtime<E> {
         &self,
         process: P,
         input: P::Input,
-    ) -> Result<Instance<'_, E>, InstanceError> {
+    ) -> Result<InstanceId, InstanceSpawnError> {
         match self
             .registered_processes
             .get(process.metadata().name.as_ref())
         {
-            Some(raw_process) if raw_process.process_type == TypeId::of::<P>() => {
-                let uuid = InstanceId::new();
-
-                // Prepare the shared storage with an observer for updating the instance status when tasks are completed.
-                let instances = self.instances.clone();
-                let end_name = raw_process.end_place().name.clone();
-                let process_name = raw_process.meta_data.name.to_string();
-                let shared_storage = SharedHistory::new().with_observer(Arc::new(
-                    move |token: TokenId, place: &str| {
-                        if place == super::START_NAME {
-                            instances.report_start(
-                                uuid,
-                                process_name.clone(),
-                                SharedHistory::new(),
-                            );
-                        } else if place == end_name {
-                            instances.report_end(uuid);
-                        } else {
-                            instances.report_task_completed(uuid, token, place);
-                        }
-                    },
-                ));
-
-                let instance =
-                    Instance::new(uuid, self, raw_process, input, shared_storage.clone());
-
-                Ok(instance)
+            Some(registered_process)
+                if registered_process.registered_process.process_type == TypeId::of::<P>() =>
+            {
+                Ok(registered_process.run(input))
             }
-            Some(_) => Err(InstanceError::InvalidContext),
-            None => Err(InstanceError::Unregistered),
+            Some(_) => Err(InstanceSpawnError::InvalidContext),
+            None => Err(InstanceSpawnError::Unregistered),
         }
     }
 
@@ -160,15 +157,4 @@ impl<E: ExtendedExecutor> Runtime<E> {
 pub enum ProcessError {
     /// A split builder branch escaped and prevented process finalization.
     DanglingProcessPart,
-}
-
-/// Errors while creating or resolving an instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum InstanceError {
-    /// Not registered
-    Unregistered,
-    /// Given the context, the process instance has already completed.
-    Completed,
-    /// The context does not match the process instance.
-    InvalidContext,
 }

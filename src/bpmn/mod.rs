@@ -1,8 +1,8 @@
-mod engine;
 /// Gateway primitives for splitting and joining BPMN control flow.
 pub mod gateways;
 mod messages;
 mod process;
+mod runtime;
 #[cfg(test)]
 mod tests;
 
@@ -15,21 +15,33 @@ use std::{borrow::Cow, ops::IndexMut};
 
 use crate::executor::Executor;
 
-pub use self::engine::{
-    Instance, InstanceError, InstanceId, InstanceStatus, ProcessError, RegisteredProcess, Runtime,
-    RuntimeApiError, RuntimeInstance, SharedHistory, Token, TokenId, Value,
-};
 pub use self::messages::{CorrelationKey, Message, MessageManager, ProcessMessages, SendError};
 pub use self::process::{MetaData, Process};
+pub use self::runtime::{
+    Handle, Instance, InstanceId, InstanceNotRunning, InstanceSpawnError, InstanceStatus,
+    Instances, ProcessError, RegisteredProcess, Runtime, RuntimeApiError, SharedHistory, Token,
+    TokenId, Value,
+};
 
 /// Executor abstraction required by the BPMN runtime.
 pub trait ExtendedExecutor:
-    'static + Send + Executor<()> + Executor<crate::petri_net::Marking<State>>
+    'static
+    + Send
+    + Executor<()>
+    + Executor<crate::petri_net::Marking<State>>
+    + serde::Serialize
+    + schemars::JsonSchema
 {
 }
 
-impl<T: 'static + Send + Executor<()> + Executor<crate::petri_net::Marking<State>>> ExtendedExecutor
-    for T
+impl<
+    T: 'static
+        + Send
+        + Executor<()>
+        + Executor<crate::petri_net::Marking<State>>
+        + serde::Serialize
+        + schemars::JsonSchema,
+> ExtendedExecutor for T
 {
 }
 

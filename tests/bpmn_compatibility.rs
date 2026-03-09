@@ -133,8 +133,16 @@ async fn throw_then_catch_message_event_with_correlation() {
         .run(WaitForMessageProcess, key)
         .expect("waiter instance must start");
 
-    let thrower_token = thrower.wait_for_completion().await;
-    let waiter_token = waiter.wait_for_completion().await;
+    let thrower_token = runtime
+        .wait_for_completion(&ThrowMessageProcess, thrower)
+        .await
+        .unwrap()
+        .unwrap();
+    let waiter_token = runtime
+        .wait_for_completion(&WaitForMessageProcess, waiter)
+        .await
+        .unwrap()
+        .unwrap();
 
     assert_eq!(thrower_token.get_last::<i32>(), Some(14));
     assert_eq!(waiter_token.get_last::<i32>(), Some(42));
@@ -173,12 +181,12 @@ async fn correlation_keys_isolate_parallel_message_instances() {
         .expect("message for key_a must be accepted");
 
     let (token_a, token_b) = tokio::join!(
-        waiter_a.wait_for_completion(),
-        waiter_b.wait_for_completion()
+        runtime.wait_for_completion(&WaitForMessageProcess, waiter_a),
+        runtime.wait_for_completion(&WaitForMessageProcess, waiter_b)
     );
 
-    assert_eq!(token_a.get_last::<i32>(), Some(15));
-    assert_eq!(token_b.get_last::<i32>(), Some(21));
+    assert_eq!(token_a.unwrap().unwrap().get_last::<i32>(), Some(15));
+    assert_eq!(token_b.unwrap().unwrap().get_last::<i32>(), Some(21));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -188,11 +196,14 @@ async fn parallel_gateway_join_produces_combined_data_object() {
         .register_process(ParallelAggregationProcess)
         .expect("parallel process registration must succeed");
 
-    let token = runtime
+    let instance = runtime
         .run(ParallelAggregationProcess, 3)
-        .expect("parallel process instance must start")
-        .wait_for_completion()
-        .await;
+        .expect("parallel process instance must start");
+    let token = runtime
+        .wait_for_completion(&ParallelAggregationProcess, instance)
+        .await
+        .unwrap()
+        .unwrap();
 
     assert_eq!(token.get_last::<[i32; 2]>(), Some([13, 23]));
     assert_eq!(token.last_step(), Some("AND Join".to_string()));
