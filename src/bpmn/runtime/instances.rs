@@ -1,21 +1,19 @@
 use dashmap::DashMap;
 
-use crate::{ExtendedExecutor, RegisteredProcess, Value};
-
-use super::{Instance, InstanceId};
+use crate::{ExtendedExecutor, Instance, InstanceId, RegisteredProcess, StorageBackend, Value};
 
 /// A collection of process instances for a specific registered process definition.
 #[derive(Debug)]
-pub struct Instances<E: ExtendedExecutor> {
+pub struct Instances<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
     /// The registered process definition for this set of instances.
-    pub registered_process: RegisteredProcess<E>,
-    instances: DashMap<InstanceId, Instance<E>>,
+    pub registered_process: RegisteredProcess<E, B>,
+    instances: DashMap<InstanceId, Instance<E, B>>,
     executor: E,
 }
 
-impl<E: ExtendedExecutor> Instances<E> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instances<E, B> {
     /// Create a new instance object.
-    pub fn new(registered_process: RegisteredProcess<E>, executor: E) -> Self {
+    pub fn new(registered_process: RegisteredProcess<E, B>, executor: E) -> Self {
         Instances {
             registered_process,
             instances: DashMap::new(),
@@ -24,12 +22,12 @@ impl<E: ExtendedExecutor> Instances<E> {
     }
 
     /// Returns an iterator over tracked process instances.
-    pub fn iter(&self) -> impl Iterator<Item = impl std::ops::Deref<Target = Instance<E>>> {
+    pub fn iter(&self) -> impl Iterator<Item = impl std::ops::Deref<Target = Instance<E, B>>> {
         self.instances.iter()
     }
 
     /// Returns one tracked instance by id.
-    pub fn get(&self, id: InstanceId) -> Option<impl std::ops::Deref<Target = Instance<E>>> {
+    pub fn get(&self, id: InstanceId) -> Option<impl std::ops::Deref<Target = Instance<E, B>>> {
         self.instances.get(&id)
     }
 
@@ -37,7 +35,7 @@ impl<E: ExtendedExecutor> Instances<E> {
     pub async fn wait_for_completion(
         &self,
         id: InstanceId,
-    ) -> Option<Result<super::Token, super::InstanceNotRunning>> {
+    ) -> Option<Result<super::Token<B::Storage>, super::InstanceNotRunning>> {
         match self.instances.get_mut(&id) {
             Some(mut instance) => Some(instance.wait_for_completion().await),
             None => None,
@@ -46,8 +44,13 @@ impl<E: ExtendedExecutor> Instances<E> {
 
     /// Run a new instance. Used internally by the runtime.
     /// This should not be called directly, because the value is not checked and will panic if not match the registered process.
-    pub(super) fn run<V: Value>(&self, input: V) -> InstanceId {
-        let instance = Instance::new(&self.registered_process, self.executor.clone(), input);
+    pub(super) fn run<V: Value>(&self, storage_backend: &B, input: V) -> InstanceId {
+        let instance = Instance::new(
+            &self.registered_process,
+            storage_backend,
+            self.executor.clone(),
+            input,
+        );
         let id = instance.id;
         self.instances.insert(id, instance);
         id

@@ -12,38 +12,40 @@ use http_body::Body;
 use parking_lot::RwLock;
 use tower_service::Service;
 
-use crate::{ExtendedExecutor, InstanceId, Runtime};
+use crate::{ExtendedExecutor, InstanceId, Runtime, StorageBackend};
 
 use super::{
     error::ApiError,
     openapi,
     response::{
-        AcceptedResponse, InstancePlacesResponse, ProcessInstancesResponse, ProcessListResponse,
-        ProcessMetadataResponse, SendMessageRequest, StartInstanceRequest, StartInstanceResponse,
-        decode_json_payload, json_response, parse_json_body,
+        AcceptedResponse, InstancePlacesResponse, ProcessListResponse, ProcessMetadataResponse,
+        SendMessageRequest, StartInstanceRequest, StartInstanceResponse, decode_json_payload,
+        json_response, parse_json_body,
     },
 };
 
 /// A service that exposes the BPMN runtime API over HTTP.
 #[derive(Clone)]
-pub struct Api<E: ExtendedExecutor>(Arc<(&'static str, RwLock<Runtime<E>>)>);
+pub struct Api<E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
+    Arc<(&'static str, RwLock<Runtime<E, B>>)>,
+);
 
-impl<E: ExtendedExecutor> std::fmt::Debug for Api<E> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> std::fmt::Debug for Api<E, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Api").finish_non_exhaustive()
     }
 }
 
-impl<E: ExtendedExecutor> Api<E> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Api<E, B> {
     /// Creates a new API service with the given runtime.
-    pub fn new(entry_point: &'static str, runtime: Runtime<E>) -> Self {
+    pub fn new(entry_point: &'static str, runtime: Runtime<E, B>) -> Self {
         Api(Arc::new((entry_point, RwLock::new(runtime))))
     }
 }
 
-impl<E, B: Body> Service<Request<B>> for Api<E>
+impl<E, B: Body, SB: StorageBackend> Service<Request<B>> for Api<E, SB>
 where
-    E: ExtendedExecutor + Send + Sync + 'static,
+    E: ExtendedExecutor<SB::Storage> + Send + Sync + 'static,
     B: Body + Send + 'static,
     B::Data: bytes::Buf + Send,
     B::Error: std::fmt::Display,
@@ -122,18 +124,18 @@ where
                         .instances()
                         .find(|p| p.registered_process.meta_data.name == *process_name)
                     {
-                        Some(instances) => {
-                            let instances: Vec<_> = instances.iter().collect();
-                            json_response(
-                                StatusCode::OK,
-                                &ProcessInstancesResponse {
-                                    instances: instances
-                                        .iter()
-                                        .map(|instance| instance.deref())
-                                        .collect(),
-                                },
-                            )
-                        }
+                        Some(instances) => json_response(
+                            StatusCode::OK,
+                            &serde_json::json!({
+                                "instances": instances
+                                            .iter()
+                                            .map(|instance| {
+                                                serde_json::to_value(instance.deref())
+                                                    .expect("unable to serialize instance")
+                                            })
+                                            .collect::<Vec<_>>(),
+                            }),
+                        ),
                         None => ApiError::not_found("unknown process").into_response(),
                     }
                 }

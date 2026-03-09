@@ -1,9 +1,10 @@
 use schemars::{JsonSchema, json_schema};
-use serde::Serialize;
+use serde::{Serialize, ser::SerializeStruct};
 use uuid::Uuid;
 
 use crate::{
-    ExtendedExecutor, RegisteredProcess, SharedHistory, State, Token, Value, executor::Executor,
+    ExtendedExecutor, RegisteredProcess, State, Storage, StorageBackend, Token, Value,
+    executor::Executor,
 };
 
 /// The ID of a BPMN process instance.
@@ -42,31 +43,33 @@ impl std::str::FromStr for InstanceId {
 }
 
 /// A instance of a process running in the background.
-#[derive(Serialize)]
-pub struct Instance<E: ExtendedExecutor> {
+pub struct Instance<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
     /// The unique identifier of this process instance.
     pub id: InstanceId,
     /// The current status of this process instance.
-    pub status: InstanceStatus<E>,
-    #[serde(skip)]
-    #[allow(dead_code)]
-    history: SharedHistory,
+    pub status: InstanceStatus<E, B>,
+    history: B::Storage,
 }
 
-impl<E: ExtendedExecutor> Instance<E> {
-    pub(crate) fn new<V: Value>(process: &RegisteredProcess<E>, executor: E, input: V) -> Self {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instance<E, B> {
+    pub(crate) fn new<V: Value>(
+        process: &RegisteredProcess<E, B>,
+        storage_backend: &B,
+        executor: E,
+        input: V,
+    ) -> Self {
         let id = InstanceId::new();
-        let history = SharedHistory::new();
-        let handle = Handle::new(executor.clone(), process, history.clone(), input);
+        let storage = storage_backend.new_instance(id);
+        let handle = Handle::new(executor.clone(), process, storage.clone(), input);
         Self {
             id,
             status: InstanceStatus::Running(handle),
-            history,
+            history: storage,
         }
     }
 
     /// Wait for the process instance to complete and return the final context. The context can be used to query the final state of the process.
-    pub async fn wait_for_completion(&mut self) -> Result<Token, InstanceNotRunning> {
+    pub async fn wait_for_completion(&mut self) -> Result<Token<B::Storage>, InstanceNotRunning> {
         self.status.wait_for_completion().await
     }
 
@@ -81,7 +84,7 @@ impl<E: ExtendedExecutor> Instance<E> {
     }
 }
 
-impl<E: ExtendedExecutor> std::fmt::Debug for Instance<E> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> std::fmt::Debug for Instance<E, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Instance")
             .field("uuid", &self.id)
@@ -89,7 +92,19 @@ impl<E: ExtendedExecutor> std::fmt::Debug for Instance<E> {
     }
 }
 
-impl<E: ExtendedExecutor> JsonSchema for Instance<E> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Serialize for Instance<E, B> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut struct_serializer = serializer.serialize_struct("Instance", 2)?;
+        struct_serializer.serialize_field("id", &self.id)?;
+        struct_serializer.serialize_field("status", &self.status)?;
+        struct_serializer.end()
+    }
+}
+
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> JsonSchema for Instance<E, B> {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "Instance".into()
     }
@@ -105,7 +120,7 @@ impl<E: ExtendedExecutor> JsonSchema for Instance<E> {
                 "type": "object",
                 "properties": {
                     "id": generator.subschema_for::<InstanceId>(),
-                    "status": generator.subschema_for::<InstanceStatus<E>>(),
+                    "status": generator.subschema_for::<InstanceStatus<E, B>>(),
                 },
                 "required": ["id", "status"],
             }
@@ -114,21 +129,22 @@ impl<E: ExtendedExecutor> JsonSchema for Instance<E> {
 }
 
 /// The "raw" handle of a process instance.
-pub struct Handle<E: ExtendedExecutor> {
+pub struct Handle<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
     executor: E,
     /// The mutex is only required to guarantee the Handle is Sync.
-    task: std::sync::Mutex<<E as Executor<crate::petri_net::Marking<State>>>::TaskHandle>,
-    end: crate::petri_net::Id<crate::petri_net::Place<State>>,
+    task:
+        std::sync::Mutex<<E as Executor<crate::petri_net::Marking<State<B::Storage>>>>::TaskHandle>,
+    end: crate::petri_net::Id<crate::petri_net::Place<State<B::Storage>>>,
 }
 
-impl<E: ExtendedExecutor> Handle<E> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Handle<E, B> {
     fn new<V: Value>(
         executor: E,
-        process: &RegisteredProcess<E>,
-        history: SharedHistory,
+        process: &RegisteredProcess<E, B>,
+        storage: B::Storage,
         input: V,
     ) -> Self {
-        let simulation = process.instantiate(executor.clone(), input, history);
+        let simulation = process.instantiate(executor.clone(), input, storage);
         let task = executor.spawn_task(simulation.run());
         Self {
             executor,
@@ -138,7 +154,7 @@ impl<E: ExtendedExecutor> Handle<E> {
     }
 }
 
-impl<E: ExtendedExecutor> std::fmt::Debug for Handle<E> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> std::fmt::Debug for Handle<E, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Handle").finish_non_exhaustive()
     }
@@ -146,16 +162,16 @@ impl<E: ExtendedExecutor> std::fmt::Debug for Handle<E> {
 
 #[derive(Debug, Serialize)]
 /// Current status of a process.
-pub enum InstanceStatus<E: ExtendedExecutor> {
+pub enum InstanceStatus<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
     /// Process is running
-    Running(#[serde(skip)] Handle<E>),
+    Running(#[serde(skip)] Handle<E, B>),
     /// Process has completed.
     Completed,
     /// Process has been stopped and can be resumed later.
     Stopped,
 }
 
-impl<E: ExtendedExecutor> JsonSchema for InstanceStatus<E> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> JsonSchema for InstanceStatus<E, B> {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "InstanceStatus".into()
     }
@@ -175,12 +191,12 @@ impl<E: ExtendedExecutor> JsonSchema for InstanceStatus<E> {
     }
 }
 
-impl<E: ExtendedExecutor> InstanceStatus<E> {
-    async fn wait_for_completion(&mut self) -> Result<Token, InstanceNotRunning> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> InstanceStatus<E, B> {
+    async fn wait_for_completion(&mut self) -> Result<Token<B::Storage>, InstanceNotRunning> {
         match std::mem::replace(self, InstanceStatus::Stopped) {
             InstanceStatus::Running(handle) => {
-                let mut marking: crate::petri_net::Marking<State> =
-                    <E as Executor<crate::petri_net::Marking<State>>>::join(
+                let mut marking: crate::petri_net::Marking<State<B::Storage>> =
+                    <E as Executor<crate::petri_net::Marking<State<B::Storage>>>>::join(
                         &handle.executor,
                         handle.task.into_inner().unwrap(),
                     )
@@ -198,7 +214,7 @@ impl<E: ExtendedExecutor> InstanceStatus<E> {
     async fn stop(&mut self) -> Result<(), InstanceNotRunning> {
         match std::mem::replace(self, InstanceStatus::Stopped) {
             InstanceStatus::Running(handle) => {
-                <E as Executor<crate::petri_net::Marking<State>>>::stop(
+                <E as Executor<crate::petri_net::Marking<State<B::Storage>>>>::stop(
                     &handle.executor,
                     handle.task.into_inner().unwrap(),
                 )
@@ -210,7 +226,9 @@ impl<E: ExtendedExecutor> InstanceStatus<E> {
     }
 }
 
-impl<E: ExtendedExecutor> std::fmt::Display for InstanceStatus<E> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> std::fmt::Display
+    for InstanceStatus<E, B>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             InstanceStatus::Running(_) => write!(f, "running"),

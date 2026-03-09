@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use crate::Storage;
+
 use super::{ProcessBuilder, Value};
 
 /// A BPMN process definition.
@@ -13,10 +15,10 @@ pub trait Process: 'static + Sized {
     fn metadata(&self) -> &MetaData;
 
     /// Define the process by building a process builder.
-    fn define(
+    fn define<S: Storage>(
         &self,
-        builder: ProcessBuilder<Self, Self::Input>,
-    ) -> ProcessBuilder<Self, Self::Output>;
+        builder: ProcessBuilder<Self, Self::Input, S>,
+    ) -> ProcessBuilder<Self, Self::Output, S>;
 }
 
 /// Meta data for a BPMN process definition.

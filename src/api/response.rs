@@ -1,11 +1,13 @@
 use http::{Response, StatusCode, header::CONTENT_TYPE};
 use http_body::Body;
 use http_body_util::BodyExt;
-use schemars::JsonSchema;
+use schemars::{JsonSchema, json_schema};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::{CorrelationKey, ExtendedExecutor, Instance, InstanceId, MetaData, Runtime};
+use crate::{
+    CorrelationKey, ExtendedExecutor, Instance, InstanceId, MetaData, Runtime, StorageBackend,
+};
 
 use super::error::ApiError;
 
@@ -47,11 +49,6 @@ pub(super) struct ProcessMetadataResponse {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub(super) struct ProcessInstancesResponse<'a, E: ExtendedExecutor> {
-    pub(super) instances: Vec<&'a Instance<E>>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub(super) struct InstancePlacesResponse {
     pub(super) instance_id: InstanceId,
     pub(super) places: Vec<String>,
@@ -87,7 +84,7 @@ pub(super) fn decode_json_payload<T: serde::de::DeserializeOwned>(
 
 pub(super) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<String> {
     let body = serde_json::to_string(value)
-        .unwrap_or_else(|err| format!(r#"{{"error":"failed to serialize response: {}"}}"#, err));
+        .unwrap_or_else(|err| format!(r#"{{"error":"failed to serialize response: {err}"}}"#));
 
     Response::builder()
         .status(status)
@@ -234,7 +231,9 @@ fn openapi_operation(summary: impl Into<String>) -> Operation {
     }
 }
 
-pub fn openapi<E: ExtendedExecutor>(runtime: &Runtime<E>) -> serde_json::Value {
+pub fn openapi<E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
+    runtime: &Runtime<E, B>,
+) -> serde_json::Value {
     let mut paths = BTreeMap::new();
 
     let mut root_get = openapi_operation("OpenAPI definition");
@@ -327,14 +326,14 @@ pub fn openapi<E: ExtendedExecutor>(runtime: &Runtime<E>) -> serde_json::Value {
             schema_response("Process not found", "ErrorBody"),
         );
         paths.insert(
-            format!("/processes/{}/", process),
+            format!("/processes/{process}/"),
             PathItem {
                 get: Some(process_get),
                 post: None,
             },
         );
 
-        let instances_path = format!("/processes/{}/instances", process);
+        let instances_path = format!("/processes/{process}/instances");
         let mut instances_post = openapi_operation("Start a process instance");
         instances_post.request_body = Some(OpenApiRequestBody {
             required: true,
@@ -374,7 +373,7 @@ pub fn openapi<E: ExtendedExecutor>(runtime: &Runtime<E>) -> serde_json::Value {
             },
         );
 
-        let messages_path = format!("/processes/{}/messages", process);
+        let messages_path = format!("/processes/{process}/messages");
         let mut messages_post = openapi_operation("Send correlated message to waiting instance(s)");
         messages_post.request_body = Some(OpenApiRequestBody {
             required: true,
@@ -439,13 +438,27 @@ pub fn openapi<E: ExtendedExecutor>(runtime: &Runtime<E>) -> serde_json::Value {
             ),
             (
                 "ProcessInstancesResponse".to_string(),
-                schema_for::<ProcessInstancesResponse<E>>(),
+                json_schema!({
+                    "type": "object",
+                    "properties": {
+                        "instances": {
+                            "type": "array",
+                            "items": schema_ref("RuntimeInstance"),
+                        },
+                    },
+                    "required": ["instances"],
+                    "additionalProperties": false,
+                })
+                .into(),
             ),
             (
                 "InstancePlacesResponse".to_string(),
                 schema_for::<InstancePlacesResponse>(),
             ),
-            ("RuntimeInstance".to_string(), schema_for::<Instance<E>>()),
+            (
+                "RuntimeInstance".to_string(),
+                schema_for::<Instance<E, B>>(),
+            ),
             ("ErrorBody".to_string(), schema_for::<ErrorBody>()),
         ]
         .into_iter()

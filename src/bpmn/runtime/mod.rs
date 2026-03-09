@@ -1,6 +1,7 @@
 mod instance;
 mod instances;
 mod registered_process;
+mod storage;
 mod token;
 
 use serde_json::Value as JsonValue;
@@ -11,30 +12,25 @@ use crate::{ExtendedExecutor, Message, MessageManager, Process, ProcessBuilder, 
 pub use instance::{Handle, Instance, InstanceId, InstanceNotRunning, InstanceStatus};
 pub use instances::{InstanceSpawnError, Instances};
 pub use registered_process::{RegisteredProcess, RuntimeApiError};
-pub use token::{SharedHistory, Token, TokenId, Value};
+pub use storage::{InMemory, InMemoryStorage, Storage, StorageBackend};
+pub use token::{Token, TokenId, Value};
 
 /// Runtime that stores process definitions and starts process instances.
-pub struct Runtime<E: ExtendedExecutor> {
-    registered_processes: HashMap<String, Instances<E>>,
+pub struct Runtime<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
+    registered_processes: HashMap<String, Instances<E, B>>,
     message_manager: MessageManager,
     executor: E,
+    storage_backend: B,
 }
 
-impl<E: ExtendedExecutor> std::fmt::Debug for Runtime<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Runtime")
-            .field("registered_processes", &self.registered_processes.len())
-            .finish_non_exhaustive()
-    }
-}
-
-impl<E: ExtendedExecutor> Runtime<E> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
     /// Creates a new runtime with the provided executor backend.
-    pub fn new(executor: E) -> Self {
+    pub fn new(executor: E, storage_backend: B) -> Self {
         Runtime {
             registered_processes: HashMap::new(),
             message_manager: MessageManager::new(),
             executor,
+            storage_backend,
         }
     }
 
@@ -64,14 +60,14 @@ impl<E: ExtendedExecutor> Runtime<E> {
     }
 
     /// Return all registered processes.
-    pub fn registered_processes(&self) -> impl Iterator<Item = &RegisteredProcess<E>> {
+    pub fn registered_processes(&self) -> impl Iterator<Item = &RegisteredProcess<E, B>> {
         self.registered_processes
             .values()
             .map(|value| &value.registered_process)
     }
 
     /// Return all tracked process instances.
-    pub fn instances(&self) -> impl Iterator<Item = &Instances<E>> {
+    pub fn instances(&self) -> impl Iterator<Item = &Instances<E, B>> {
         self.registered_processes.values()
     }
 
@@ -89,7 +85,7 @@ impl<E: ExtendedExecutor> Runtime<E> {
         &self,
         process: &P,
         instance_id: InstanceId,
-    ) -> Option<Result<Token, InstanceNotRunning>> {
+    ) -> Option<Result<Token<B::Storage>, InstanceNotRunning>> {
         match self
             .registered_processes
             .values()
@@ -143,7 +139,7 @@ impl<E: ExtendedExecutor> Runtime<E> {
             Some(registered_process)
                 if registered_process.registered_process.process_type == TypeId::of::<P>() =>
             {
-                Ok(registered_process.run(input))
+                Ok(registered_process.run(&self.storage_backend, input))
             }
             Some(_) => Err(InstanceSpawnError::InvalidContext),
             None => Err(InstanceSpawnError::Unregistered),
@@ -158,6 +154,22 @@ impl<E: ExtendedExecutor> Runtime<E> {
         message: Message<P, V>,
     ) -> Result<(), SendError> {
         self.message_manager.send_message(message)
+    }
+}
+
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> std::fmt::Debug for Runtime<E, B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Runtime")
+            .field("registered_processes", &self.registered_processes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<E: Default + ExtendedExecutor<B::Storage>, B: Default + StorageBackend> Default
+    for Runtime<E, B>
+{
+    fn default() -> Self {
+        Self::new(E::default(), B::default())
     }
 }
 

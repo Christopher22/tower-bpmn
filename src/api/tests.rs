@@ -3,8 +3,8 @@ use http_body_util::{Empty, Full};
 use tower_service::Service;
 
 use crate::{
-    Api, CorrelationKey, IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Token,
-    executor::TokioExecutor,
+    Api, CorrelationKey, InMemory, IncomingMessage, MetaData, Process, ProcessBuilder, Runtime,
+    Storage, Token, executor::TokioExecutor,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,11 +19,11 @@ impl Process for StartProcess {
         &META
     }
 
-    fn define(
+    fn define<S: Storage>(
         &self,
-        process: ProcessBuilder<Self, Self::Input>,
-    ) -> ProcessBuilder<Self, Self::Output> {
-        process.then("identity", |_token: &Token, value| value)
+        process: ProcessBuilder<Self, Self::Input, S>,
+    ) -> ProcessBuilder<Self, Self::Output, S> {
+        process.then("identity", |_token: &Token<S>, value| value)
     }
 }
 
@@ -39,10 +39,10 @@ impl Process for MessageTarget {
         &META
     }
 
-    fn define(
+    fn define<S: Storage>(
         &self,
-        process: ProcessBuilder<Self, Self::Input>,
-    ) -> ProcessBuilder<Self, Self::Output> {
+        process: ProcessBuilder<Self, Self::Input, S>,
+    ) -> ProcessBuilder<Self, Self::Output, S> {
         process.then("target", |_token, value| value)
     }
 }
@@ -59,10 +59,10 @@ impl Process for WaitProcess {
         &META
     }
 
-    fn define(
+    fn define<S: Storage>(
         &self,
-        process: ProcessBuilder<Self, Self::Input>,
-    ) -> ProcessBuilder<Self, Self::Output> {
+        process: ProcessBuilder<Self, Self::Input, S>,
+    ) -> ProcessBuilder<Self, Self::Output, S> {
         process
             .wait_for(IncomingMessage::<MessageTarget, i32>::new(
                 MessageTarget,
@@ -72,8 +72,8 @@ impl Process for WaitProcess {
     }
 }
 
-fn build_api() -> Api<TokioExecutor> {
-    let mut runtime = Runtime::new(TokioExecutor);
+fn build_api() -> Api<TokioExecutor, InMemory> {
+    let mut runtime = Runtime::default();
     runtime.register_process(StartProcess).unwrap();
     runtime.register_process(MessageTarget).unwrap();
     runtime.register_process(WaitProcess).unwrap();
@@ -107,7 +107,7 @@ fn post_raw(path: &str, body: &str, content_type: &str) -> Request<Full<bytes::B
 }
 
 async fn call_json<B>(
-    api: &mut Api<TokioExecutor>,
+    api: &mut Api<TokioExecutor, InMemory>,
     request: Request<B>,
 ) -> (StatusCode, serde_json::Value)
 where
@@ -121,7 +121,7 @@ where
     (status, value)
 }
 
-async fn openapi_doc(api: &mut Api<TokioExecutor>) -> serde_json::Value {
+async fn openapi_doc(api: &mut Api<TokioExecutor, InMemory>) -> serde_json::Value {
     let (status, body) = call_json(api, get("/api/")).await;
     assert_eq!(status, StatusCode::OK);
     body
@@ -146,7 +146,7 @@ fn instance_matches_status(
 }
 
 async fn wait_for_instance_status(
-    api: &mut Api<TokioExecutor>,
+    api: &mut Api<TokioExecutor, InMemory>,
     process_name: &str,
     instance_id: &str,
     expected: &str,
@@ -171,7 +171,7 @@ async fn wait_for_instance_status(
 }
 
 async fn wait_for_instance_presence(
-    api: &mut Api<TokioExecutor>,
+    api: &mut Api<TokioExecutor, InMemory>,
     process_name: &str,
     instance_id: &str,
 ) -> bool {
@@ -195,7 +195,7 @@ async fn wait_for_instance_presence(
 }
 
 async fn wait_for_instance_place(
-    api: &mut Api<TokioExecutor>,
+    api: &mut Api<TokioExecutor, InMemory>,
     instance_id: &str,
     expected_place: &str,
 ) -> bool {
@@ -415,7 +415,7 @@ async fn returns_current_places_for_known_instance() {
     let instance_id = start_body["instance_id"].as_str().unwrap().to_string();
 
     assert!(
-        wait_for_instance_place(&mut api, &instance_id, "incoming").await,
+        wait_for_instance_place(&mut api, &instance_id, "Start").await,
         "instance did not expose expected current place in time"
     );
 

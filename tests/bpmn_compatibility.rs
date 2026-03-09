@@ -1,5 +1,6 @@
 use axum_bpmn::{
-    CorrelationKey, IncomingMessage, Message, Process, ProcessBuilder, Runtime, Token,
+    CorrelationKey, InMemory, IncomingMessage, Message, Process, ProcessBuilder, Runtime, Storage,
+    Token,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,10 +18,10 @@ impl Process for MessageTarget {
         &META
     }
 
-    fn define(
+    fn define<S: Storage>(
         &self,
-        process: ProcessBuilder<Self, Self::Input>,
-    ) -> ProcessBuilder<Self, Self::Output> {
+        process: ProcessBuilder<Self, Self::Input, S>,
+    ) -> ProcessBuilder<Self, Self::Output, S> {
         process.then("identity", |_token, value| value)
     }
 }
@@ -40,10 +41,10 @@ impl Process for WaitForMessageProcess {
         &META
     }
 
-    fn define(
+    fn define<S: Storage>(
         &self,
-        process: ProcessBuilder<Self, Self::Input>,
-    ) -> ProcessBuilder<Self, Self::Output> {
+        process: ProcessBuilder<Self, Self::Input, S>,
+    ) -> ProcessBuilder<Self, Self::Output, S> {
         process
             .wait_for(IncomingMessage::<MessageTarget, i32>::new(
                 MessageTarget,
@@ -68,14 +69,14 @@ impl Process for ThrowMessageProcess {
         &META
     }
 
-    fn define(
+    fn define<S: Storage>(
         &self,
-        process: ProcessBuilder<Self, Self::Input>,
-    ) -> ProcessBuilder<Self, Self::Output> {
+        process: ProcessBuilder<Self, Self::Input, S>,
+    ) -> ProcessBuilder<Self, Self::Output, S> {
         process
             .throw_message(
                 "message-throw-event",
-                |_token: &Token, (correlation_key, payload): (CorrelationKey, i32)| Message {
+                |_token: &Token<S>, (correlation_key, payload): (CorrelationKey, i32)| Message {
                     process: MessageTarget,
                     payload,
                     correlation_key,
@@ -100,10 +101,10 @@ impl Process for ParallelAggregationProcess {
         &META
     }
 
-    fn define(
+    fn define<S: Storage>(
         &self,
-        process: ProcessBuilder<Self, Self::Input>,
-    ) -> ProcessBuilder<Self, Self::Output> {
+        process: ProcessBuilder<Self, Self::Input, S>,
+    ) -> ProcessBuilder<Self, Self::Output, S> {
         let [left, right] = process.split(axum_bpmn::gateways::And);
         ProcessBuilder::join(
             axum_bpmn::gateways::And,
@@ -117,7 +118,7 @@ impl Process for ParallelAggregationProcess {
 
 #[tokio::test(flavor = "current_thread")]
 async fn throw_then_catch_message_event_with_correlation() {
-    let mut runtime = Runtime::new(axum_bpmn::executor::TokioExecutor);
+    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime
         .register_process(ThrowMessageProcess)
         .expect("throw process registration must succeed");
@@ -150,7 +151,7 @@ async fn throw_then_catch_message_event_with_correlation() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn correlation_keys_isolate_parallel_message_instances() {
-    let mut runtime = Runtime::new(axum_bpmn::executor::TokioExecutor);
+    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime
         .register_process(WaitForMessageProcess)
         .expect("wait process registration must succeed");
@@ -191,7 +192,7 @@ async fn correlation_keys_isolate_parallel_message_instances() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn parallel_gateway_join_produces_combined_data_object() {
-    let mut runtime = Runtime::new(axum_bpmn::executor::TokioExecutor);
+    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime
         .register_process(ParallelAggregationProcess)
         .expect("parallel process registration must succeed");

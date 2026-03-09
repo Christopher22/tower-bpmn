@@ -15,10 +15,10 @@ impl Process for DummyProcess {
         &META
     }
 
-    fn define(
+    fn define<S: Storage>(
         &self,
-        builder: ProcessBuilder<Self, Self::Input>,
-    ) -> ProcessBuilder<Self, Self::Output> {
+        builder: ProcessBuilder<Self, Self::Input, S>,
+    ) -> ProcessBuilder<Self, Self::Output, S> {
         builder.then("identity", |_token, value| value)
     }
 }
@@ -38,10 +38,10 @@ impl Process for XorUnitProcess {
         &META
     }
 
-    fn define(
+    fn define<S: Storage>(
         &self,
-        builder: ProcessBuilder<Self, Self::Input>,
-    ) -> ProcessBuilder<Self, Self::Output> {
+        builder: ProcessBuilder<Self, Self::Input, S>,
+    ) -> ProcessBuilder<Self, Self::Output, S> {
         let [left, right] =
             builder
                 .then("prepare", |_token, value| value)
@@ -74,10 +74,10 @@ impl Process for MessageTargetProcess {
         &META
     }
 
-    fn define(
+    fn define<S: Storage>(
         &self,
-        builder: ProcessBuilder<Self, Self::Input>,
-    ) -> ProcessBuilder<Self, Self::Output> {
+        builder: ProcessBuilder<Self, Self::Input, S>,
+    ) -> ProcessBuilder<Self, Self::Output, S> {
         builder.then("identity", |_token, value| value)
     }
 }
@@ -97,10 +97,10 @@ impl Process for ThrowingProcess {
         &META
     }
 
-    fn define(
+    fn define<S: Storage>(
         &self,
-        builder: ProcessBuilder<Self, Self::Input>,
-    ) -> ProcessBuilder<Self, Self::Output> {
+        builder: ProcessBuilder<Self, Self::Input, S>,
+    ) -> ProcessBuilder<Self, Self::Output, S> {
         builder
             .throw_message("throw", |_token, (key, payload)| Message {
                 process: MessageTargetProcess,
@@ -126,10 +126,10 @@ impl Process for WaitingProcess {
         &META
     }
 
-    fn define(
+    fn define<S: Storage>(
         &self,
-        builder: ProcessBuilder<Self, Self::Input>,
-    ) -> ProcessBuilder<Self, Self::Output> {
+        builder: ProcessBuilder<Self, Self::Input, S>,
+    ) -> ProcessBuilder<Self, Self::Output, S> {
         builder
             .wait_for(IncomingMessage::<MessageTargetProcess, i32>::new(
                 MessageTargetProcess,
@@ -141,7 +141,7 @@ impl Process for WaitingProcess {
 
 #[test]
 fn runtime_returns_unregistered_error_for_unknown_process() {
-    let runtime = Runtime::new(crate::executor::TokioExecutor);
+    let runtime: Runtime<crate::executor::TokioExecutor, InMemory> = Runtime::default();
     let result = runtime.run(DummyProcess, 1);
     assert!(matches!(result, Err(InstanceSpawnError::Unregistered)));
 }
@@ -162,7 +162,7 @@ async fn timer_waitable_with_past_time_resolves_immediately() {
     let timer = Timer("timer".into());
     let output = <Timer as Waitable<DummyProcess, DateTime<Utc>, ()>>::wait_for(
         &timer,
-        &Token::new(SharedHistory::new()),
+        &Token::new(InMemoryStorage::for_test()),
         Utc::now() - Duration::seconds(1),
     )
     .await;
@@ -177,7 +177,7 @@ async fn timer_waitable_with_future_time_resolves_with_current_semantics() {
         TokioDuration::from_millis(50),
         <Timer as Waitable<DummyProcess, DateTime<Utc>, ()>>::wait_for(
             &timer,
-            &Token::new(SharedHistory::new()),
+            &Token::new(InMemoryStorage::for_test()),
             Utc::now() + Duration::milliseconds(30),
         ),
     )
@@ -188,7 +188,7 @@ async fn timer_waitable_with_future_time_resolves_with_current_semantics() {
 
 #[test]
 fn xor_process_definition_registers_successfully() {
-    let mut runtime = Runtime::new(crate::executor::TokioExecutor);
+    let mut runtime: Runtime<crate::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime
         .register_process(XorUnitProcess)
         .expect("process registration must work");
@@ -204,7 +204,7 @@ async fn incoming_message_waitable_returns_payload() {
     messages.send(key, 77_i32);
 
     let value = waitable
-        .wait_for(&Token::new(SharedHistory::new()), key)
+        .wait_for(&Token::new(InMemoryStorage::for_test()), key)
         .await;
     assert_eq!(value, 77);
 }
@@ -218,7 +218,7 @@ async fn incoming_message_waitable_ignores_other_correlation_keys() {
     let expected_key = CorrelationKey::new();
     let other_key = CorrelationKey::new();
 
-    let wait_future = waitable.wait_for(&Token::new(SharedHistory::new()), expected_key);
+    let wait_future = waitable.wait_for(&Token::new(InMemoryStorage::for_test()), expected_key);
     messages.send(other_key, 11_i32);
     messages.send(expected_key, 88_i32);
 
@@ -230,7 +230,7 @@ async fn incoming_message_waitable_ignores_other_correlation_keys() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn throw_message_and_wait_for_message_roundtrip() {
-    let mut runtime = Runtime::new(crate::executor::TokioExecutor);
+    let mut runtime: Runtime<crate::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime
         .register_process(ThrowingProcess)
         .expect("throw process registration must work");

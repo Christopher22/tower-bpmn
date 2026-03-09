@@ -5,39 +5,41 @@ use serde_json::Value as JsonValue;
 
 use crate::{
     CorrelationKey, ExtendedExecutor, InstanceId, InstanceSpawnError, Message, MetaData, Process,
-    ProcessBuilder, ProcessError, Runtime, SendError, SharedHistory, State, Step, Token, Value,
+    ProcessBuilder, ProcessError, Runtime, SendError, State, Step, StorageBackend, Token, Value,
     petri_net::{FirstCompetingStrategy, PetriNet, Simulation},
 };
 
+type PetriNetRef<S> = Arc<PetriNet<Step<S>, State<S>>>;
+
 /// A registered process definition.
 #[derive(Debug, Serialize)]
-pub struct RegisteredProcess<E: ExtendedExecutor> {
+pub struct RegisteredProcess<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
     /// Meta data of the registered process.
     pub meta_data: MetaData,
     /// Schema of the value which could be passed to this process to start it.
     pub input_schema: JsonValue,
     #[serde(skip)]
-    pub(crate) petri_net: Arc<PetriNet<Step, State>>,
+    pub(crate) petri_net: PetriNetRef<B::Storage>,
     #[serde(skip)]
-    pub(crate) start: crate::petri_net::Id<crate::petri_net::Place<State>>,
+    pub(crate) start: crate::petri_net::Id<crate::petri_net::Place<State<B::Storage>>>,
     #[serde(skip)]
-    pub(crate) end: crate::petri_net::Id<crate::petri_net::Place<State>>,
+    pub(crate) end: crate::petri_net::Id<crate::petri_net::Place<State<B::Storage>>>,
     #[serde(skip)]
     pub(crate) process_type: TypeId,
     #[serde(skip)]
     pub(crate) input_type: TypeId,
     #[serde(skip)]
-    dynamic_api: DynamicCaller<E>,
+    dynamic_api: DynamicCaller<E, B>,
 }
 
-impl<E: ExtendedExecutor> RegisteredProcess<E> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RegisteredProcess<E, B> {
     /// Create a new raw process from a PetriNet representation and type information.
     fn new<P: Process>(
         meta_data: MetaData,
-        petri_net: Arc<PetriNet<Step, State>>,
-        start_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
-        current_place: crate::petri_net::Id<crate::petri_net::Place<State>>,
-        dynamic_api: DynamicCaller<E>,
+        petri_net: PetriNetRef<B::Storage>,
+        start_place: crate::petri_net::Id<crate::petri_net::Place<State<B::Storage>>>,
+        current_place: crate::petri_net::Id<crate::petri_net::Place<State<B::Storage>>>,
+        dynamic_api: DynamicCaller<E, B>,
     ) -> Self {
         Self {
             meta_data,
@@ -58,12 +60,12 @@ impl<E: ExtendedExecutor> RegisteredProcess<E> {
     }
 
     /// Create a new simulation for this process with the given input. The simulation will be initialized with the input token at the start place of the process.
-    pub(crate) fn instantiate<A: ExtendedExecutor, V: Value>(
+    pub(crate) fn instantiate<A: ExtendedExecutor<B::Storage>, V: Value>(
         &self,
         executor: A,
         input: V,
-        shared_storage: SharedHistory,
-    ) -> Simulation<A, FirstCompetingStrategy, Step, State> {
+        shared_storage: B::Storage,
+    ) -> Simulation<A, FirstCompetingStrategy, Step<B::Storage>, State<B::Storage>> {
         assert_eq!(
             self.input_type,
             TypeId::of::<V>(),
@@ -79,7 +81,7 @@ impl<E: ExtendedExecutor> RegisteredProcess<E> {
     /// Start the process by its name.
     pub(crate) fn run_dynamic(
         &self,
-        runtime: &Runtime<E>,
+        runtime: &Runtime<E, B>,
         input: JsonValue,
     ) -> Result<InstanceId, RuntimeApiError> {
         (self.dynamic_api.start)(runtime, input)
@@ -88,7 +90,7 @@ impl<E: ExtendedExecutor> RegisteredProcess<E> {
     /// Send a dynamic message.
     pub(crate) fn send_message_dynamic(
         &self,
-        runtime: &Runtime<E>,
+        runtime: &Runtime<E, B>,
         correlation_key: CorrelationKey,
         payload: JsonValue,
     ) -> Result<(), RuntimeApiError> {
@@ -96,15 +98,17 @@ impl<E: ExtendedExecutor> RegisteredProcess<E> {
     }
 }
 
-impl<P, V, E> TryFrom<(ProcessBuilder<P, V>, DynamicCaller<E>)> for RegisteredProcess<E>
+impl<P, V, E, B> TryFrom<(ProcessBuilder<P, V, B::Storage>, DynamicCaller<E, B>)>
+    for RegisteredProcess<E, B>
 where
     P: Process,
     V: Value,
-    E: ExtendedExecutor,
+    E: ExtendedExecutor<B::Storage>,
+    B: StorageBackend,
 {
     type Error = ProcessError;
     fn try_from(
-        (mut builder, dynamic_api): (ProcessBuilder<P, V>, DynamicCaller<E>),
+        (mut builder, dynamic_api): (ProcessBuilder<P, V, B::Storage>, DynamicCaller<E, B>),
     ) -> Result<Self, Self::Error> {
         let mut petri_net = PetriNet::default();
         match Arc::get_mut(&mut builder.petri_net) {
@@ -122,30 +126,32 @@ where
     }
 }
 
-impl<E: ExtendedExecutor> std::fmt::Display for RegisteredProcess<E> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> std::fmt::Display
+    for RegisteredProcess<E, B>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.meta_data.name)
     }
 }
 
-type ApiStart<E> =
-    Arc<dyn Fn(&Runtime<E>, JsonValue) -> Result<InstanceId, RuntimeApiError> + Send + Sync>;
-type ApiSendMessage<E> = Arc<
-    dyn Fn(&Runtime<E>, CorrelationKey, JsonValue) -> Result<(), RuntimeApiError> + Send + Sync,
+type ApiStart<E, B> =
+    Arc<dyn Fn(&Runtime<E, B>, JsonValue) -> Result<InstanceId, RuntimeApiError> + Send + Sync>;
+type ApiSendMessage<E, B> = Arc<
+    dyn Fn(&Runtime<E, B>, CorrelationKey, JsonValue) -> Result<(), RuntimeApiError> + Send + Sync,
 >;
 
-pub(super) struct DynamicCaller<E: ExtendedExecutor> {
-    start: ApiStart<E>,
-    send_message: ApiSendMessage<E>,
+pub(super) struct DynamicCaller<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
+    start: ApiStart<E, B>,
+    send_message: ApiSendMessage<E, B>,
 }
 
-impl<E: ExtendedExecutor> DynamicCaller<E> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> DynamicCaller<E, B> {
     pub fn new<P: Process + Clone + Send + Sync>(
         process_for_start: P,
         process_for_message: P,
     ) -> Self {
         Self {
-            start: Arc::new(move |runtime: &Runtime<E>, input: JsonValue| {
+            start: Arc::new(move |runtime: &Runtime<E, B>, input: JsonValue| {
                 let value: P::Input = serde_json::from_value(input)
                     .map_err(|err| RuntimeApiError::InvalidPayload(err.to_string()))?;
                 runtime
@@ -153,7 +159,9 @@ impl<E: ExtendedExecutor> DynamicCaller<E> {
                     .map_err(RuntimeApiError::Instance)
             }),
             send_message: Arc::new(
-                move |runtime: &Runtime<E>, correlation_key: CorrelationKey, payload: JsonValue| {
+                move |runtime: &Runtime<E, B>,
+                      correlation_key: CorrelationKey,
+                      payload: JsonValue| {
                     let value: P::Input = serde_json::from_value(payload)
                         .map_err(|err| RuntimeApiError::InvalidPayload(err.to_string()))?;
                     runtime
@@ -169,7 +177,7 @@ impl<E: ExtendedExecutor> DynamicCaller<E> {
     }
 }
 
-impl<E: ExtendedExecutor> std::fmt::Debug for DynamicCaller<E> {
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> std::fmt::Debug for DynamicCaller<E, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DynamicCaller").finish_non_exhaustive()
     }
