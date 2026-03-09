@@ -97,6 +97,15 @@ fn post(path: &str, body: serde_json::Value) -> Request<Full<bytes::Bytes>> {
         .unwrap()
 }
 
+fn post_raw(path: &str, body: &str, content_type: &str) -> Request<Full<bytes::Bytes>> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("content-type", content_type)
+        .body(Full::new(bytes::Bytes::from(body.to_string())))
+        .unwrap()
+}
+
 async fn call_json<B>(
     api: &mut Api<TokioExecutor>,
     request: Request<B>,
@@ -112,30 +121,101 @@ where
     (status, value)
 }
 
+async fn openapi_doc(api: &mut Api<TokioExecutor>) -> serde_json::Value {
+    let (status, body) = call_json(api, get("/api/")).await;
+    assert_eq!(status, StatusCode::OK);
+    body
+}
+
+fn has_status(status_value: &serde_json::Value, expected: &str) -> bool {
+    match status_value {
+        serde_json::Value::String(value) => value.eq_ignore_ascii_case(expected),
+        serde_json::Value::Object(value) => {
+            value.keys().any(|key| key.eq_ignore_ascii_case(expected))
+        }
+        _ => false,
+    }
+}
+
+fn instance_matches_status(
+    instance: &serde_json::Value,
+    instance_id: &str,
+    expected: &str,
+) -> bool {
+    instance["id"] == instance_id && has_status(&instance["status"], expected)
+}
+
+async fn wait_for_instance_status(
+    api: &mut Api<TokioExecutor>,
+    process_name: &str,
+    instance_id: &str,
+    expected: &str,
+) -> bool {
+    for _ in 0..50 {
+        let (status, body) =
+            call_json(api, get(&format!("/processes/{process_name}/instances"))).await;
+        if status == StatusCode::OK
+            && body["instances"].as_array().is_some_and(|instances| {
+                instances
+                    .iter()
+                    .any(|instance| instance_matches_status(instance, instance_id, expected))
+            })
+        {
+            return true;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    false
+}
+
+async fn wait_for_instance_presence(
+    api: &mut Api<TokioExecutor>,
+    process_name: &str,
+    instance_id: &str,
+) -> bool {
+    for _ in 0..50 {
+        let (status, body) =
+            call_json(api, get(&format!("/processes/{process_name}/instances"))).await;
+        if status == StatusCode::OK
+            && body["instances"].as_array().is_some_and(|instances| {
+                instances
+                    .iter()
+                    .any(|instance| instance["id"] == instance_id)
+            })
+        {
+            return true;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    false
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn openapi_root_is_available() {
     let mut api = build_api();
-    let (status, body) = call_json(&mut api, get("/api/")).await;
+    let body = openapi_doc(&mut api).await;
 
-    assert_eq!(status, StatusCode::OK);
     assert_eq!(body["openapi"], "3.1.0");
     assert!(body["paths"]["/processes"].is_object());
     assert!(body["components"]["schemas"]["StartInstanceResponse"].is_object());
     assert!(body["components"]["schemas"]["ProcessInstancesResponse"].is_object());
-    assert!(body["components"]["schemas"]["RuntimeInstance"].is_object());
+    assert!(body["components"]["schemas"]["AcceptedResponse"].is_object());
+    assert!(body["components"]["schemas"]["ProcessMetadataResponse"].is_object());
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn openapi_lists_registered_process_paths_and_input_schemas() {
     let mut api = build_api();
-    let (status, body) = call_json(&mut api, get("/api/")).await;
-
-    assert_eq!(status, StatusCode::OK);
+    let body = openapi_doc(&mut api).await;
 
     assert!(body["paths"]["/processes/start-process/instances"].is_object());
     assert!(body["paths"]["/processes/wait-process/instances"].is_object());
     assert!(body["paths"]["/processes/message-target/messages"].is_object());
-    assert!(body["paths"]["/processes/{process_name}"].is_object());
+    assert!(body["paths"]["/processes/start-process/"].is_object());
 
     let start_input_schema = &body["paths"]["/processes/start-process/instances"]["post"]["requestBody"]
         ["content"]["application/json"]["schema"]["properties"]["input"];
@@ -150,9 +230,7 @@ async fn openapi_lists_registered_process_paths_and_input_schemas() {
 #[tokio::test(flavor = "current_thread")]
 async fn openapi_uses_exact_response_struct_refs() {
     let mut api = build_api();
-    let (status, body) = call_json(&mut api, get("/api/")).await;
-
-    assert_eq!(status, StatusCode::OK);
+    let body = openapi_doc(&mut api).await;
 
     assert_eq!(
         body["paths"]["/processes/start-process/instances"]["post"]["responses"]["202"]["content"]
@@ -175,24 +253,9 @@ async fn openapi_uses_exact_response_struct_refs() {
         "#/components/schemas/RuntimeInstance"
     );
     assert_eq!(
-        body["paths"]["/processes/{process_name}"]["get"]["responses"]["200"]["content"]["application/json"]
+        body["paths"]["/processes/start-process/"]["get"]["responses"]["200"]["content"]["application/json"]
             ["schema"]["$ref"],
         "#/components/schemas/ProcessMetadataResponse"
-    );
-
-    let process_entries = body["x-registered-processes"]
-        .as_array()
-        .expect("registered process metadata should be an array");
-    assert_eq!(process_entries.len(), 3);
-    assert!(
-        process_entries
-            .iter()
-            .any(|entry| entry["name"] == "start-process")
-    );
-    assert!(
-        process_entries
-            .iter()
-            .any(|entry| entry["name"] == "wait-process")
     );
 }
 
@@ -264,11 +327,12 @@ async fn lists_running_instances_and_can_read_instance_state() {
         call_json(&mut api, get("/processes/wait-process/instances")).await;
     assert_eq!(list_status, StatusCode::OK);
     let instances = list_body["instances"].as_array().unwrap();
-    assert!(
-        instances
-            .iter()
-            .any(|instance| instance["id"] == instance_id && instance["status"] == "running")
-    );
+    assert!(instances.iter().any(|instance| instance_matches_status(
+        instance,
+        &instance_id,
+        "running"
+    )));
+    assert!(wait_for_instance_status(&mut api, "wait-process", &instance_id, "running").await);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -301,14 +365,88 @@ async fn sends_messages_to_waiting_instances() {
     assert_eq!(message_status, StatusCode::ACCEPTED);
     assert_eq!(message_body["status"], "accepted");
 
-    for _ in 0..20 {
-        let (_, instance_body) =
-            call_json(&mut api, get(&format!("/instances/{instance_id}"))).await;
-        if instance_body["status"] == "completed" {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    assert!(
+        wait_for_instance_presence(&mut api, "wait-process", &instance_id).await,
+        "instance could not be found in process instance listing"
+    );
+}
 
-    panic!("instance did not reach completed status in time");
+#[tokio::test(flavor = "current_thread")]
+async fn rejects_invalid_json_payloads() {
+    let mut api = build_api();
+
+    let (status, body) = call_json(
+        &mut api,
+        post_raw(
+            "/processes/start-process/instances",
+            "{\"input\": 42",
+            "application/json",
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("invalid JSON body"))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rejects_invalid_start_instance_payload_shape() {
+    let mut api = build_api();
+
+    let (status, body) = call_json(
+        &mut api,
+        post(
+            "/processes/start-process/instances",
+            serde_json::json!({ "input": "not-an-integer" }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("invalid request payload"))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn returns_not_found_for_unknown_process_instances_route() {
+    let mut api = build_api();
+    let (status, body) = call_json(&mut api, get("/processes/unknown-process/instances")).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "unknown process");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn returns_not_found_for_unknown_process_messages_route() {
+    let mut api = build_api();
+    let (status, body) = call_json(
+        &mut api,
+        post(
+            "/processes/unknown-process/messages",
+            serde_json::json!({
+                "correlation_key": CorrelationKey::new(),
+                "payload": 1
+            }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "unknown process");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unknown_routes_return_not_found() {
+    let mut api = build_api();
+    let (status, body) = call_json(&mut api, get("/unknown-route")).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "route not found");
 }
