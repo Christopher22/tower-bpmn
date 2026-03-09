@@ -2,6 +2,7 @@ use chrono::DateTime;
 use dashmap::DashMap;
 use schemars::JsonSchema;
 use std::any::TypeId;
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use std::{any::Any, sync::Arc};
@@ -66,7 +67,11 @@ impl Entry {
 
 /// A (shared) history of token values, indexed by type and token id, with timestamps for determining the current value at a given place in the process. This is shared between all tokens in the same process instance, allowing them to see each other's values according to their branching history.
 #[derive(Clone)]
-pub struct SharedHistory(Arc<DashMap<TypeId, Vec<Entry>>>, Option<TokenObserver>);
+pub struct SharedHistory(
+    Arc<DashMap<TypeId, Vec<Entry>>>,
+    Option<TokenObserver>,
+    Arc<DashMap<TokenId, String>>,
+);
 
 impl std::fmt::Debug for SharedHistory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -77,7 +82,7 @@ impl std::fmt::Debug for SharedHistory {
 impl SharedHistory {
     /// Creates a new shared history with no entries.
     pub fn new() -> Self {
-        SharedHistory(Arc::new(DashMap::new()), None)
+        SharedHistory(Arc::new(DashMap::new()), None, Arc::new(DashMap::new()))
     }
 
     /// Register a observer tracking changes.
@@ -97,9 +102,21 @@ impl SharedHistory {
             }
         }
 
+        self.2.insert(token_id, place.to_string());
+
         if let Some(observer) = &self.1 {
             observer(token_id, place);
         }
+    }
+
+    /// Returns the set of places where this instance currently has at least one token branch.
+    pub fn current_places(&self) -> Vec<String> {
+        self.2
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 }
 
@@ -218,5 +235,19 @@ mod tests {
 
         assert_eq!(root.get_last::<i32>(), Some(5));
         assert_eq!(child.get_last::<i32>(), Some(9));
+    }
+
+    #[test]
+    fn shared_history_tracks_current_places_for_active_branches() {
+        let root = Token::new(SharedHistory::new())
+            .set_output("start", 1_i32)
+            .set_output("root-step", 2_i32);
+        let child = root.fork().set_output("child-step", 3_i32);
+
+        assert_eq!(
+            root.shared_history.current_places(),
+            vec!["child-step".to_string(), "root-step".to_string()]
+        );
+        assert_eq!(child.last_step(), Some("child-step".into()));
     }
 }

@@ -250,7 +250,7 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
             if ADD_OUTPUT {
                 vec![token.set_output(name, output)]
             } else {
-                vec![token]
+                vec![token.set_output(name, ())]
             }
         })
     }
@@ -344,6 +344,7 @@ impl<P: Process, E: Value> ProcessBuilder<P, E> {
                 .get_last()
                 .expect("the input value should be present in the token history");
             let output_name = name.to_string();
+            let token = token.set_output(name, ());
             let future: Pin<Box<dyn futures::Future<Output = Vec<Token>> + Send>> =
                 Box::pin(async move {
                     let output = waitable.wait_for(&token, value).await;

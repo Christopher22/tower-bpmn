@@ -74,6 +74,11 @@ impl<E: ExtendedExecutor> Instance<E> {
     pub async fn stop(&mut self) -> Result<(), InstanceNotRunning> {
         self.status.stop().await
     }
+
+    /// Returns the places where this instance currently has token branches.
+    pub fn current_places(&self) -> Vec<String> {
+        self.history.current_places()
+    }
 }
 
 impl<E: ExtendedExecutor> std::fmt::Debug for Instance<E> {

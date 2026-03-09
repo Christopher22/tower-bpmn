@@ -75,6 +75,15 @@ impl<E: ExtendedExecutor> Runtime<E> {
         self.registered_processes.values()
     }
 
+    /// Returns the places where the specified instance currently has token branches.
+    pub fn instance_places(&self, instance_id: InstanceId) -> Option<Vec<String>> {
+        self.instances().find_map(|instances| {
+            instances
+                .get(instance_id)
+                .map(|instance| instance.current_places())
+        })
+    }
+
     /// Wait for a specific instance to complete and return the final context. Returns None if the instance is not found, or Some(Err) if the instance is not running.
     pub async fn wait_for_completion<P: Process>(
         &self,

@@ -12,15 +12,15 @@ use http_body::Body;
 use parking_lot::RwLock;
 use tower_service::Service;
 
-use crate::{ExtendedExecutor, Runtime};
+use crate::{ExtendedExecutor, InstanceId, Runtime};
 
 use super::{
     error::ApiError,
     openapi,
     response::{
-        AcceptedResponse, ProcessInstancesResponse, ProcessListResponse, ProcessMetadataResponse,
-        SendMessageRequest, StartInstanceRequest, StartInstanceResponse, decode_json_payload,
-        json_response, parse_json_body,
+        AcceptedResponse, InstancePlacesResponse, ProcessInstancesResponse, ProcessListResponse,
+        ProcessMetadataResponse, SendMessageRequest, StartInstanceRequest, StartInstanceResponse,
+        decode_json_payload, json_response, parse_json_body,
     },
 };
 
@@ -135,6 +135,29 @@ where
                             )
                         }
                         None => ApiError::not_found("unknown process").into_response(),
+                    }
+                }
+                ("GET", ["instances", instance_id, "places"]) => {
+                    let instance_id = match instance_id.parse::<InstanceId>() {
+                        Ok(instance_id) => instance_id,
+                        Err(err) => {
+                            return Ok(ApiError::bad_request(format!(
+                                "invalid instance id: {err}"
+                            ))
+                            .into_response());
+                        }
+                    };
+
+                    let runtime = runtime.read();
+                    match runtime.instance_places(instance_id) {
+                        Some(places) => json_response(
+                            StatusCode::OK,
+                            &InstancePlacesResponse {
+                                instance_id,
+                                places,
+                            },
+                        ),
+                        None => ApiError::not_found("unknown instance").into_response(),
                     }
                 }
                 ("POST", ["processes", process_name, "messages"]) => {

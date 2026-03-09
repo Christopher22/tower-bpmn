@@ -52,6 +52,12 @@ pub(super) struct ProcessInstancesResponse<'a, E: ExtendedExecutor> {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct InstancePlacesResponse {
+    pub(super) instance_id: InstanceId,
+    pub(super) places: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub(super) struct ErrorBody {
     pub(super) error: String,
 }
@@ -283,6 +289,33 @@ pub fn openapi<E: ExtendedExecutor>(runtime: &Runtime<E>) -> serde_json::Value {
         },
     );
 
+    let mut instance_places_get = openapi_operation("Get current places for an instance");
+    instance_places_get.parameters.push(OpenApiParameter {
+        name: "instance_id",
+        in_location: "path",
+        required: true,
+        schema: schema_for::<InstanceId>(),
+    });
+    instance_places_get.responses.insert(
+        "200".to_string(),
+        schema_response("Current instance places", "InstancePlacesResponse"),
+    );
+    instance_places_get.responses.insert(
+        "400".to_string(),
+        schema_response("Invalid instance id", "ErrorBody"),
+    );
+    instance_places_get.responses.insert(
+        "404".to_string(),
+        schema_response("Instance not found", "ErrorBody"),
+    );
+    paths.insert(
+        "/instances/{instance_id}/places".to_string(),
+        PathItem {
+            get: Some(instance_places_get),
+            post: None,
+        },
+    );
+
     for process in runtime.registered_processes() {
         let mut process_get = openapi_operation("Get process metadata");
         process_get.responses.insert(
@@ -408,6 +441,11 @@ pub fn openapi<E: ExtendedExecutor>(runtime: &Runtime<E>) -> serde_json::Value {
                 "ProcessInstancesResponse".to_string(),
                 schema_for::<ProcessInstancesResponse<E>>(),
             ),
+            (
+                "InstancePlacesResponse".to_string(),
+                schema_for::<InstancePlacesResponse>(),
+            ),
+            ("RuntimeInstance".to_string(), schema_for::<Instance<E>>()),
             ("ErrorBody".to_string(), schema_for::<ErrorBody>()),
         ]
         .into_iter()

@@ -194,6 +194,27 @@ async fn wait_for_instance_presence(
     false
 }
 
+async fn wait_for_instance_place(
+    api: &mut Api<TokioExecutor>,
+    instance_id: &str,
+    expected_place: &str,
+) -> bool {
+    for _ in 0..50 {
+        let (status, body) = call_json(api, get(&format!("/instances/{instance_id}/places"))).await;
+        if status == StatusCode::OK
+            && body["places"]
+                .as_array()
+                .is_some_and(|places| places.iter().any(|place| place == expected_place))
+        {
+            return true;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    false
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn openapi_root_is_available() {
     let mut api = build_api();
@@ -203,6 +224,7 @@ async fn openapi_root_is_available() {
     assert!(body["paths"]["/processes"].is_object());
     assert!(body["components"]["schemas"]["StartInstanceResponse"].is_object());
     assert!(body["components"]["schemas"]["ProcessInstancesResponse"].is_object());
+    assert!(body["components"]["schemas"]["InstancePlacesResponse"].is_object());
     assert!(body["components"]["schemas"]["AcceptedResponse"].is_object());
     assert!(body["components"]["schemas"]["ProcessMetadataResponse"].is_object());
 }
@@ -215,6 +237,7 @@ async fn openapi_lists_registered_process_paths_and_input_schemas() {
     assert!(body["paths"]["/processes/start-process/instances"].is_object());
     assert!(body["paths"]["/processes/wait-process/instances"].is_object());
     assert!(body["paths"]["/processes/message-target/messages"].is_object());
+    assert!(body["paths"]["/instances/{instance_id}/places"].is_object());
     assert!(body["paths"]["/processes/start-process/"].is_object());
 
     let start_input_schema = &body["paths"]["/processes/start-process/instances"]["post"]["requestBody"]
@@ -256,6 +279,11 @@ async fn openapi_uses_exact_response_struct_refs() {
         body["paths"]["/processes/start-process/"]["get"]["responses"]["200"]["content"]["application/json"]
             ["schema"]["$ref"],
         "#/components/schemas/ProcessMetadataResponse"
+    );
+    assert_eq!(
+        body["paths"]["/instances/{instance_id}/places"]["get"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "#/components/schemas/InstancePlacesResponse"
     );
 }
 
@@ -372,6 +400,33 @@ async fn sends_messages_to_waiting_instances() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn returns_current_places_for_known_instance() {
+    let mut api = build_api();
+    let correlation_key = CorrelationKey::new();
+
+    let (_, start_body) = call_json(
+        &mut api,
+        post(
+            "/processes/wait-process/instances",
+            serde_json::json!({ "input": correlation_key }),
+        ),
+    )
+    .await;
+    let instance_id = start_body["instance_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_instance_place(&mut api, &instance_id, "incoming").await,
+        "instance did not expose expected current place in time"
+    );
+
+    let (status, body) =
+        call_json(&mut api, get(&format!("/instances/{instance_id}/places"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["instance_id"], instance_id);
+    assert!(body["places"].is_array());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn rejects_invalid_json_payloads() {
     let mut api = build_api();
 
@@ -440,6 +495,29 @@ async fn returns_not_found_for_unknown_process_messages_route() {
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "unknown process");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn returns_not_found_for_unknown_instance_places_route() {
+    let mut api = build_api();
+    let unknown_id = uuid::Uuid::new_v4().to_string();
+    let (status, body) = call_json(&mut api, get(&format!("/instances/{unknown_id}/places"))).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "unknown instance");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rejects_invalid_instance_id_for_places_route() {
+    let mut api = build_api();
+    let (status, body) = call_json(&mut api, get("/instances/not-a-uuid/places")).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("invalid instance id"))
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

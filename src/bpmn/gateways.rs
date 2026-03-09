@@ -64,7 +64,12 @@ impl<const NUM: usize, V: Value> JoinableGateway<NUM, V> for Xor<(), V> {
         for (index, place) in current_places.into_iter().enumerate() {
             let transition = petri_net.add_transition(super::Step::Task(
                 format!("XOR Join {index}"),
-                Box::new(|_name: &str, state: Vec<super::Token>| state),
+                Box::new(|name: &str, state: Vec<super::Token>| {
+                    state
+                        .into_iter()
+                        .map(|token| token.set_output(name, ()))
+                        .collect()
+                }),
             ));
             petri_net.connect_place(place, transition, ());
             petri_net.connect_transition(transition, output, ());
@@ -102,7 +107,7 @@ impl<V: Value, C: Fn(&super::Token, V) -> usize + Clone + Sync + Send + 'static>
                             .get_last::<V>()
                             .expect("the input value should be present in the token history");
                         if callback(&token, value) == i {
-                            vec![token]
+                            vec![token.set_output(&format!("XOR Transition {i}"), ())]
                         } else {
                             vec![]
                         }
