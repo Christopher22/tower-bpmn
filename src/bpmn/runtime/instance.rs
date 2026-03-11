@@ -3,8 +3,10 @@ use serde::{Serialize, ser::SerializeStruct};
 use uuid::Uuid;
 
 use crate::{
-    ExtendedExecutor, RegisteredProcess, State, Storage, StorageBackend, Token, Value,
+    ExtendedExecutor, RegisteredProcess, ResumableProcess, State, Step, Storage, StorageBackend,
+    Token, Value,
     executor::Executor,
+    petri_net::{FirstCompetingStrategy, Id, Place, Simulation},
 };
 
 /// The ID of a BPMN process instance.
@@ -48,23 +50,38 @@ pub struct Instance<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
     pub id: InstanceId,
     /// The current status of this process instance.
     pub status: InstanceStatus<E, B>,
-    history: B::Storage,
+    pub(super) history: B::Storage,
 }
 
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instance<E, B> {
-    pub(crate) fn new<V: Value>(
+    pub(super) fn new<V: Value>(
         process: &RegisteredProcess<E, B>,
         storage_backend: &B,
         executor: E,
         input: V,
     ) -> Self {
         let id = InstanceId::new();
-        let storage = storage_backend.new_instance(id);
-        let handle = Handle::new(executor.clone(), process, storage.clone(), input);
+        let storage = storage_backend.new_instance(process, id);
+        let simulation = process.start(executor.clone(), input, storage.clone());
+        let handle = Handle::new(executor.clone(), simulation, process.end);
         Self {
             id,
             status: InstanceStatus::Running(handle),
             history: storage,
+        }
+    }
+
+    pub(super) fn resume(
+        process: &RegisteredProcess<E, B>,
+        executor: E,
+        resumable_process: ResumableProcess<B>,
+    ) -> Self {
+        let simulation = process.resume(executor.clone(), resumable_process.current_state);
+        let handle = Handle::new(executor.clone(), simulation, process.end);
+        Self {
+            id: resumable_process.id,
+            status: InstanceStatus::Running(handle),
+            history: resumable_process.storage,
         }
     }
 
@@ -134,22 +151,20 @@ pub struct Handle<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
     /// The mutex is only required to guarantee the Handle is Sync.
     task:
         std::sync::Mutex<<E as Executor<crate::petri_net::Marking<State<B::Storage>>>>::TaskHandle>,
-    end: crate::petri_net::Id<crate::petri_net::Place<State<B::Storage>>>,
+    end: Id<Place<State<B::Storage>>>,
 }
 
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Handle<E, B> {
-    fn new<V: Value>(
+    fn new(
         executor: E,
-        process: &RegisteredProcess<E, B>,
-        storage: B::Storage,
-        input: V,
+        simulation: Simulation<E, FirstCompetingStrategy, Step<B::Storage>, State<B::Storage>>,
+        end: Id<Place<State<B::Storage>>>,
     ) -> Self {
-        let simulation = process.instantiate(executor.clone(), input, storage);
         let task = executor.spawn_task(simulation.run());
         Self {
             executor,
             task: std::sync::Mutex::new(task),
-            end: process.end,
+            end,
         }
     }
 }

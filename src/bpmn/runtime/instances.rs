@@ -1,6 +1,8 @@
 use dashmap::DashMap;
 
-use crate::{ExtendedExecutor, Instance, InstanceId, RegisteredProcess, StorageBackend, Value};
+use crate::{
+    ExtendedExecutor, Instance, InstanceId, RegisteredProcess, ResumeError, StorageBackend, Value,
+};
 
 /// A collection of process instances for a specific registered process definition.
 #[derive(Debug)]
@@ -54,6 +56,18 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instances<E, B> {
         let id = instance.id;
         self.instances.insert(id, instance);
         id
+    }
+
+    /// Try to resume a paused instance.
+    pub fn resume(&self, storage_backend: &B, id: InstanceId) -> Result<InstanceId, ResumeError> {
+        let instance = Instance::resume(
+            &self.registered_process,
+            self.executor.clone(),
+            storage_backend.resume_instance(&self.registered_process, id)?,
+        );
+        let id = instance.id;
+        self.instances.insert(id, instance);
+        Ok(id)
     }
 }
 

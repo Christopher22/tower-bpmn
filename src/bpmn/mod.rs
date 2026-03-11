@@ -19,8 +19,9 @@ pub use self::messages::{CorrelationKey, Message, MessageManager, ProcessMessage
 pub use self::process::{MetaData, Process};
 pub use self::runtime::{
     Handle, InMemory, InMemoryStorage, Instance, InstanceId, InstanceNotRunning,
-    InstanceSpawnError, InstanceStatus, Instances, ProcessError, RegisteredProcess, Runtime,
-    RuntimeApiError, Storage, StorageBackend, Token, TokenId, Value,
+    InstanceSpawnError, InstanceStatus, Instances, ProcessError, RegisteredProcess,
+    ResumableProcess, ResumeError, Runtime, RuntimeApiError, Storage, StorageBackend, Token,
+    TokenId, Value,
 };
 
 /// Executor abstraction required by the BPMN runtime.
@@ -109,7 +110,7 @@ impl<S: Storage> crate::petri_net::Color for State<S> {
                 "The number of tokens produced by the transition does not match the number of output arcs"
             );
         }
-        for arc in &transition.output {
+        for arc in &transition.input {
             marking[arc.target] = State::Inactive;
         }
         for (token, arc) in state.into_iter().zip(transition.output.iter()) {

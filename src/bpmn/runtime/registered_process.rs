@@ -6,7 +6,7 @@ use serde_json::Value as JsonValue;
 use crate::{
     CorrelationKey, ExtendedExecutor, InstanceId, InstanceSpawnError, Message, MetaData, Process,
     ProcessBuilder, ProcessError, Runtime, SendError, State, Step, StorageBackend, Token, Value,
-    petri_net::{FirstCompetingStrategy, PetriNet, Simulation},
+    petri_net::{FirstCompetingStrategy, Id, PetriNet, Place, Simulation},
 };
 
 type PetriNetRef<S> = Arc<PetriNet<Step<S>, State<S>>>;
@@ -19,17 +19,17 @@ pub struct RegisteredProcess<E: ExtendedExecutor<B::Storage>, B: StorageBackend>
     /// Schema of the value which could be passed to this process to start it.
     pub input_schema: JsonValue,
     #[serde(skip)]
-    pub(crate) petri_net: PetriNetRef<B::Storage>,
+    pub(crate) start: Id<Place<State<B::Storage>>>,
     #[serde(skip)]
-    pub(crate) start: crate::petri_net::Id<crate::petri_net::Place<State<B::Storage>>>,
-    #[serde(skip)]
-    pub(crate) end: crate::petri_net::Id<crate::petri_net::Place<State<B::Storage>>>,
+    pub(crate) end: Id<Place<State<B::Storage>>>,
     #[serde(skip)]
     pub(crate) process_type: TypeId,
     #[serde(skip)]
     pub(crate) input_type: TypeId,
     #[serde(skip)]
     dynamic_api: DynamicCaller<E, B>,
+    #[serde(skip)]
+    petri_net: PetriNetRef<B::Storage>,
 }
 
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RegisteredProcess<E, B> {
@@ -37,8 +37,8 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RegisteredProcess<E, B>
     fn new<P: Process>(
         meta_data: MetaData,
         petri_net: PetriNetRef<B::Storage>,
-        start_place: crate::petri_net::Id<crate::petri_net::Place<State<B::Storage>>>,
-        current_place: crate::petri_net::Id<crate::petri_net::Place<State<B::Storage>>>,
+        start_place: Id<Place<State<B::Storage>>>,
+        current_place: Id<Place<State<B::Storage>>>,
         dynamic_api: DynamicCaller<E, B>,
     ) -> Self {
         Self {
@@ -60,7 +60,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RegisteredProcess<E, B>
     }
 
     /// Create a new simulation for this process with the given input. The simulation will be initialized with the input token at the start place of the process.
-    pub(crate) fn instantiate<A: ExtendedExecutor<B::Storage>, V: Value>(
+    pub(crate) fn start<A: ExtendedExecutor<B::Storage>, V: Value>(
         &self,
         executor: A,
         input: V,
@@ -75,6 +75,20 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RegisteredProcess<E, B>
         let mut simulation =
             Simulation::new(executor, self.petri_net.clone(), FirstCompetingStrategy);
         simulation[self.start] = State::Completed(token);
+        simulation
+    }
+
+    /// Resume a simulation.
+    pub(crate) fn resume<A: ExtendedExecutor<B::Storage>>(
+        &self,
+        executor: A,
+        serialized_storage: super::storage::SerializedMarking<B::Storage>,
+    ) -> Simulation<A, FirstCompetingStrategy, Step<B::Storage>, State<B::Storage>> {
+        let mut simulation =
+            Simulation::new(executor, self.petri_net.clone(), FirstCompetingStrategy);
+        for entry in serialized_storage {
+            simulation[entry.0] = State::Completed(entry.1);
+        }
         simulation
     }
 

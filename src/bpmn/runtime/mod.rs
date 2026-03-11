@@ -12,7 +12,9 @@ use crate::{ExtendedExecutor, Message, MessageManager, Process, ProcessBuilder, 
 pub use instance::{Handle, Instance, InstanceId, InstanceNotRunning, InstanceStatus};
 pub use instances::{InstanceSpawnError, Instances};
 pub use registered_process::{RegisteredProcess, RuntimeApiError};
-pub use storage::{InMemory, InMemoryStorage, Storage, StorageBackend};
+pub use storage::{
+    InMemory, InMemoryStorage, ResumableProcess, ResumeError, Storage, StorageBackend,
+};
 pub use token::{Token, TokenId, Value};
 
 /// Runtime that stores process definitions and starts process instances.

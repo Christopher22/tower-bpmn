@@ -7,7 +7,10 @@ use std::{
 use chrono::DateTime;
 use dashmap::DashMap;
 
-use crate::{InstanceId, TokenId, Value};
+use crate::{
+    ExtendedExecutor, InstanceId, RegisteredProcess, State, Token, TokenId, Value,
+    petri_net::{Id, Place},
+};
 
 /// A backend suitable for storing the data of instances.
 pub trait StorageBackend: 'static + Clone + Sized + Send + Sync {
@@ -15,7 +18,32 @@ pub trait StorageBackend: 'static + Clone + Sized + Send + Sync {
     type Storage: Storage;
 
     /// Register a new instance.
-    fn new_instance(&self, process_id: InstanceId) -> Self::Storage;
+    fn new_instance<E: ExtendedExecutor<Self::Storage>>(
+        &self,
+        process: &RegisteredProcess<E, Self>,
+        process_id: InstanceId,
+    ) -> Self::Storage;
+
+    /// Resume an instance by its ID, returning the values of the PetriNet if the instance is found and belongs to the given process.
+    fn resume_instance<E: ExtendedExecutor<Self::Storage>>(
+        &self,
+        process: &RegisteredProcess<E, Self>,
+        process_id: InstanceId,
+    ) -> Result<ResumableProcess<Self>, ResumeError>;
+
+    /// Yield a list of all paused instances which could be resumed, along with the name of the process they belong to.
+    fn paused_instances(&self) -> Vec<(String, InstanceId)>;
+}
+
+/// A serialized marking which could be used to resume an instance.
+pub(super) type SerializedMarking<B> = Vec<(Id<Place<State<B>>>, Token<B>)>;
+
+/// A process which could be resumed.
+#[derive(Debug)]
+pub struct ResumableProcess<B: StorageBackend> {
+    pub(super) id: InstanceId,
+    pub(super) current_state: SerializedMarking<B::Storage>,
+    pub(super) storage: B::Storage,
 }
 
 /// A storage for a process instance, which can be used to store token values and other data related to the instance. This is shared between all tokens in the same process instance, allowing them to see each other's values according to their branching history.
@@ -72,13 +100,29 @@ impl Default for InMemory {
 impl StorageBackend for InMemory {
     type Storage = InMemoryStorage;
 
-    fn new_instance(&self, process_id: InstanceId) -> Self::Storage {
+    fn new_instance<E: ExtendedExecutor<Self::Storage>>(
+        &self,
+        _process: &RegisteredProcess<E, Self>,
+        process_id: InstanceId,
+    ) -> Self::Storage {
         let history = Arc::new(RawHistory {
             entries: DashMap::new(),
             current_places: DashMap::new(),
         });
         self.0.insert(process_id, history.clone());
         InMemoryStorage(history)
+    }
+
+    fn resume_instance<E: ExtendedExecutor<Self::Storage>>(
+        &self,
+        _process: &RegisteredProcess<E, Self>,
+        _process_id: InstanceId,
+    ) -> Result<ResumableProcess<Self>, ResumeError> {
+        Err(ResumeError::NotFound)
+    }
+
+    fn paused_instances(&self) -> Vec<(String, InstanceId)> {
+        Vec::new()
     }
 }
 
@@ -168,3 +212,23 @@ impl Storage for InMemoryStorage {
             .map(|(_, place, _)| place)
     }
 }
+
+/// Errors that can occur when trying to resume a paused instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeError {
+    /// No instance with the given ID was found.
+    NotFound,
+    /// An instance with the given ID was found, but it belongs to a different process.
+    ProcessMismatch,
+}
+
+impl std::fmt::Display for ResumeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResumeError::NotFound => write!(f, "Instance not found"),
+            ResumeError::ProcessMismatch => write!(f, "Instance belongs to a different process"),
+        }
+    }
+}
+
+impl std::error::Error for ResumeError {}
