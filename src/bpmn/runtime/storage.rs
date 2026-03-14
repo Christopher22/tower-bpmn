@@ -1,6 +1,5 @@
 use std::{
     any::{Any, TypeId},
-    collections::BTreeSet,
     sync::Arc,
 };
 
@@ -8,7 +7,8 @@ use chrono::DateTime;
 use dashmap::DashMap;
 
 use crate::{
-    ExtendedExecutor, InstanceId, ProcessName, RegisteredProcess, State, Token, TokenId, Value,
+    ExtendedExecutor, InstanceId, ProcessName, RegisteredProcess, State, Step, Token, TokenId,
+    Value,
     petri_net::{Id, Place},
 };
 
@@ -49,32 +49,32 @@ pub struct ResumableProcess<B: StorageBackend> {
 /// A storage for a process instance, which can be used to store token values and other data related to the instance. This is shared between all tokens in the same process instance, allowing them to see each other's values according to their branching history.
 pub trait Storage: 'static + std::fmt::Debug + Clone + Send + Sync + Eq {
     /// Add a new entry to the storage for the given token ID, place, and value.
-    fn add<V: Value>(&self, token_id: TokenId, place: &str, value: V);
+    fn add<V: Value>(&self, token_id: TokenId, place: Step, value: V);
 
     /// Return all the states currently active.
-    fn current_places(&self) -> Vec<String>;
+    fn current_places(&self) -> Vec<Step>;
 
     /// Returns the most recent value of type `T`.
     fn get_last<T: Value>(&self, token_ids: &[TokenId]) -> Option<T>;
 
     /// Returns the name of the last step finished by any of the given token.
-    fn last_step(&self, token_ids: &[TokenId]) -> Option<String>;
+    fn last_step(&self, token_ids: &[TokenId]) -> Option<Step>;
 }
 
 #[derive(Debug)]
 struct Entry {
     timestamp: DateTime<chrono::Utc>,
-    place: String,
+    place: Step,
     token_id: TokenId,
     /// This is enforced to be a "Value"
     value: Box<dyn Any + Send + Sync>,
 }
 
 impl Entry {
-    pub fn new<S: Into<String>, V: Value>(token_id: TokenId, place: S, value: V) -> Self {
+    pub fn new<V: Value>(token_id: TokenId, place: Step, value: V) -> Self {
         Entry {
             timestamp: chrono::Utc::now(),
-            place: place.into(),
+            place,
             token_id,
             value: Box::new(value),
         }
@@ -84,7 +84,7 @@ impl Entry {
 #[derive(Debug)]
 struct RawHistory {
     entries: DashMap<TypeId, Vec<Entry>>,
-    current_places: DashMap<TokenId, String>,
+    current_places: DashMap<TokenId, Step>,
 }
 
 /// An in-memory storage backend, which is suitable for testing and simple use cases.
@@ -156,8 +156,8 @@ impl std::fmt::Debug for InMemoryStorage {
 }
 
 impl Storage for InMemoryStorage {
-    fn add<V: Value>(&self, token_id: TokenId, place: &str, value: V) {
-        let data_entry = Entry::new(token_id, place, value);
+    fn add<V: Value>(&self, token_id: TokenId, place: Step, value: V) {
+        let data_entry = Entry::new(token_id, place.clone(), value);
         match self.0.entries.entry(TypeId::of::<V>()) {
             dashmap::Entry::Occupied(mut entry) => {
                 entry.get_mut().push(data_entry);
@@ -166,16 +166,14 @@ impl Storage for InMemoryStorage {
                 entry.insert(vec![data_entry]);
             }
         }
-        self.0.current_places.insert(token_id, place.to_string());
+        self.0.current_places.insert(token_id, place);
     }
 
-    fn current_places(&self) -> Vec<String> {
+    fn current_places(&self) -> Vec<Step> {
         self.0
             .current_places
             .iter()
             .map(|entry| entry.value().clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
             .collect()
     }
 
@@ -196,7 +194,7 @@ impl Storage for InMemoryStorage {
     }
 
     /// Returns the name of the last step finished by this token.
-    fn last_step(&self, token_ids: &[TokenId]) -> Option<String> {
+    fn last_step(&self, token_ids: &[TokenId]) -> Option<Step> {
         self.0
             .entries
             .iter()

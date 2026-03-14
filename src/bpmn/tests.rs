@@ -45,12 +45,15 @@ impl Process for XorUnitProcess {
         let [left, right] =
             builder
                 .then("prepare", |_token, value| value)
-                .split(gateways::Xor::for_splitting(|_token, value: i32| {
-                    if value % 2 == 0 { 0 } else { 1 }
-                }));
+                .split(gateways::Xor::for_splitting(
+                    "Modulo",
+                    |_token, value: i32| {
+                        if value % 2 == 0 { 0 } else { 1 }
+                    },
+                ));
 
         ProcessBuilder::join(
-            gateways::Xor::for_joining(),
+            gateways::Xor::for_joining("Post modulo"),
             [
                 left.then("left", |_token, value| value + 10),
                 right.then("right", |_token, value| value + 100),

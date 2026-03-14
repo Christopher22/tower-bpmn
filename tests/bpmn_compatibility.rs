@@ -1,6 +1,6 @@
 use axum_bpmn::{
-    CorrelationKey, InMemory, IncomingMessage, Message, Process, ProcessBuilder, Runtime, Storage,
-    Token,
+    CorrelationKey, InMemory, IncomingMessage, Message, Process, ProcessBuilder, Runtime, Step,
+    Storage, Token,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,9 +105,9 @@ impl Process for ParallelAggregationProcess {
         &self,
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
-        let [left, right] = process.split(axum_bpmn::gateways::And);
+        let [left, right] = process.split(axum_bpmn::gateways::And("AND Split".into()));
         ProcessBuilder::join(
-            axum_bpmn::gateways::And,
+            axum_bpmn::gateways::And("Join path".into()),
             [
                 left.then("left-path", |_token, value| value + 10),
                 right.then("right-path", |_token, value| value + 20),
@@ -207,5 +207,5 @@ async fn parallel_gateway_join_produces_combined_data_object() {
         .unwrap();
 
     assert_eq!(token.get_last::<[i32; 2]>(), Some([13, 23]));
-    assert_eq!(token.last_step(), Some("AND Join".to_string()));
+    assert_eq!(token.last_step().unwrap().as_str(), Step::END);
 }

@@ -3,6 +3,7 @@ pub mod gateways;
 mod messages;
 mod process;
 mod runtime;
+mod steps;
 #[cfg(test)]
 mod tests;
 
@@ -23,6 +24,7 @@ pub use self::runtime::{
     ResumableProcess, ResumeError, Runtime, RuntimeApiError, Storage, StorageBackend, Token,
     TokenId, Value,
 };
+pub use self::steps::{InvalidStep, Step, Steps, StepsBuilder, UnfinishedBuilder};
 
 /// Executor abstraction required by the BPMN runtime.
 pub trait ExtendedExecutor<S: Storage>:
@@ -62,7 +64,7 @@ impl<S: Storage> crate::petri_net::Color for State<S> {
 
     type State = Vec<Token<S>>;
     type Weight = ();
-    type Id = String;
+    type Id = ();
 
     fn is_transition_enabled<A: 'static>(
         transition: &crate::petri_net::Transition<A, Self>,
@@ -78,15 +80,13 @@ impl<S: Storage> crate::petri_net::Color for State<S> {
         // runtime type introspection. This ensures only the selected branch is enabled.
         use std::any::Any;
         let action_any: &dyn Any = &transition.action;
-        if let Some(step) = action_any.downcast_ref::<Step<S>>() {
-            if let Step::XorBranch(_, guard) = step {
-                if let Some(arc) = transition.input.first() {
-                    if let State::Completed(ref token) = marking[arc.target] {
-                        return guard(token);
-                    }
+        if let Some(BpmnStep::XorBranch(_, guard)) = action_any.downcast_ref::<BpmnStep<S>>() {
+            if let Some(arc) = transition.input.first() {
+                if let State::Completed(ref token) = marking[arc.target] {
+                    return guard(token);
                 }
-                return false;
             }
+            return false;
         }
         true
     }
@@ -133,18 +133,18 @@ impl<S: Storage> crate::petri_net::Color for State<S> {
     }
 }
 
-pub(crate) enum Step<S: Storage> {
+pub(crate) enum BpmnStep<S: Storage> {
     And(usize),
-    Task(String, StepTaskFn<S>),
-    Waitable(String, StepWaitFn<S>),
+    Task(Step, StepTaskFn<S>),
+    Waitable(Step, StepWaitFn<S>),
     /// An exclusive-gateway branch. The guard closure returns `true` when this
     /// particular branch is the one selected by the XOR condition at run-time.
     /// `is_transition_enabled` uses it so the branch is invisible to the simulation
     /// unless it is the correct one, giving proper BPMN XOR-split semantics.
-    XorBranch(String, Box<dyn Fn(&Token<S>) -> bool + Send + Sync>),
+    XorBranch(Step, StepXorGuardFn<S>),
 }
 
-impl<S: Storage> std::fmt::Debug for Step<S> {
+impl<S: Storage> std::fmt::Debug for BpmnStep<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::And(arg0) => f.debug_tuple("And").field(arg0).finish(),
@@ -155,17 +155,18 @@ impl<S: Storage> std::fmt::Debug for Step<S> {
     }
 }
 
-type StepTaskFn<S> = Box<dyn Fn(&str, Vec<Token<S>>) -> Vec<Token<S>> + Send + Sync>;
+type StepTaskFn<S> = Box<dyn Fn(Step, Vec<Token<S>>) -> Vec<Token<S>> + Send + Sync>;
 type StepWaitFuture<S> = Pin<Box<dyn futures::Future<Output = Vec<Token<S>>> + Send>>;
-type StepWaitFn<S> = Box<dyn Fn(&str, Vec<Token<S>>) -> StepWaitFuture<S> + Send + Sync>;
+type StepWaitFn<S> = Box<dyn Fn(Step, Vec<Token<S>>) -> StepWaitFuture<S> + Send + Sync>;
+type StepXorGuardFn<S> = Box<dyn Fn(&Token<S>) -> bool + Send + Sync>;
 
-impl<S: Storage> crate::petri_net::Callable<Vec<Token<S>>> for Step<S> {
+impl<S: Storage> crate::petri_net::Callable<Vec<Token<S>>> for BpmnStep<S> {
     fn create_future(
         &self,
         state: Vec<Token<S>>,
     ) -> impl Future<Output = Vec<Token<S>>> + 'static + Send {
         match self {
-            Step::And(num_copies) => {
+            BpmnStep::And(num_copies) => {
                 assert_eq!(
                     state.len(),
                     1,
@@ -176,19 +177,18 @@ impl<S: Storage> crate::petri_net::Callable<Vec<Token<S>>> for Step<S> {
                     (0..*num_copies).map(|_| token.fork()).collect(),
                 ))
             }
-            Step::Task(name, task) => {
-                let result = task(name, state);
+            BpmnStep::Task(name, task) => {
+                let result = task(name.clone(), state);
                 Box::pin(futures::future::ready(result))
             }
-            Step::Waitable(name, future) => future(name, state),
-            Step::XorBranch(name, _guard) => {
+            BpmnStep::Waitable(name, future) => future(name.clone(), state),
+            BpmnStep::XorBranch(name, _guard) => {
                 // Guard already checked by is_transition_enabled; this branch is the
                 // selected one. Pass the token through, recording the step name.
-                let name = name.clone();
                 Box::pin(futures::future::ready(
                     state
                         .into_iter()
-                        .map(|token| token.set_output(&name, ()))
+                        .map(|token| token.set_output(name.clone(), ()))
                         .collect(),
                 ))
             }
@@ -196,18 +196,16 @@ impl<S: Storage> crate::petri_net::Callable<Vec<Token<S>>> for Step<S> {
     }
 }
 
-pub(crate) const START_NAME: &str = "Start";
-
 /// Builder used to define BPMN processes declaratively.
 pub struct ProcessBuilder<P: Process, E: Value, S: Storage> {
     meta_data: MetaData,
     process: std::marker::PhantomData<fn() -> P>,
     input_type: std::marker::PhantomData<fn() -> E>,
-    petri_net: Arc<RwLock<crate::petri_net::PetriNet<Step<S>, State<S>>>>,
+    petri_net: Arc<RwLock<crate::petri_net::PetriNet<BpmnStep<S>, State<S>>>>,
     start_place: crate::petri_net::Id<crate::petri_net::Place<State<S>>>,
     current_place: crate::petri_net::Id<crate::petri_net::Place<State<S>>>,
     message_manager: MessageManager,
-    used_names: std::collections::HashSet<String>,
+    steps: StepsBuilder,
 }
 
 impl<P: Process, E: Value, S: Storage> std::fmt::Debug for ProcessBuilder<P, E, S> {
@@ -219,8 +217,12 @@ impl<P: Process, E: Value, S: Storage> std::fmt::Debug for ProcessBuilder<P, E, 
 impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
     pub(crate) fn new(meta_data: MetaData, message_manager: MessageManager) -> Self {
         let mut petri_net = crate::petri_net::PetriNet::default();
-        let current_place =
-            petri_net.add_place(crate::petri_net::Place::new(START_NAME, State::Inactive));
+        let current_place = petri_net.add_place(crate::petri_net::Place::new((), State::Inactive));
+
+        // Add a special start step that is always enabled to kick off the process.
+        let steps = StepsBuilder::default();
+        steps.add_start();
+
         ProcessBuilder {
             meta_data,
             process: std::marker::PhantomData,
@@ -229,25 +231,16 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
             start_place: current_place,
             current_place,
             message_manager,
-            used_names: [START_NAME.to_string()].into_iter().collect(),
+            steps,
         }
     }
 
     fn add_next_place(
         &mut self,
-        name: String,
-        step: Step<S>,
+        step: BpmnStep<S>,
     ) -> crate::petri_net::Id<crate::petri_net::Place<State<S>>> {
-        // Ensure that task names are unique within the process definition for better observability and debugging.
-        if self.used_names.contains(&name) {
-            panic!("Duplicate task name: {name}");
-        } else {
-            self.used_names.insert(name.clone());
-        }
-
         let mut petri_net = self.petri_net.write();
-        let new_place =
-            petri_net.add_place(crate::petri_net::Place::new(name.clone(), State::Inactive));
+        let new_place = petri_net.add_place(crate::petri_net::Place::new((), State::Inactive));
         let transition = petri_net.add_transition(step);
         petri_net.connect_place(self.current_place, transition, ());
         petri_net.connect_transition(transition, new_place, ());
@@ -258,7 +251,7 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
     fn wrap_function<const ADD_OUTPUT: bool, U: Value>(
         func: impl Fn(&Token<S>, E) -> U + 'static + Send + Sync,
     ) -> StepTaskFn<S> {
-        Box::new(move |name: &str, state: Vec<Token<S>>| {
+        Box::new(move |name: Step, state: Vec<Token<S>>| {
             assert!(
                 state.len() == 1,
                 "Exactly one token should be consumed by a task"
@@ -276,24 +269,38 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
         })
     }
 
+    /// Add a end. This is required to complete the process definition and make it executable.
+    pub(super) fn add_end(mut self) -> Self {
+        let end_place = self.add_next_place(BpmnStep::Task(
+            self.steps.add_end(),
+            Box::new(|name: Step, state: Vec<Token<S>>| {
+                assert!(
+                    state.len() == 1,
+                    "Exactly one token should be consumed by a task"
+                );
+                vec![state.into_iter().next().unwrap().set_output(name, ())]
+            }),
+        ));
+        self.current_place = end_place;
+        self
+    }
+
     /// Adds a service task that transforms the current payload.
     pub fn then<U: Value>(
         mut self,
         name: impl Into<Cow<'static, str>>,
         func: impl Fn(&Token<S>, E) -> U + 'static + Send + Sync,
     ) -> ProcessBuilder<P, U, S> {
-        let name: String = name.into().into();
+        let name = self.steps.add(name.into()).expect("failed to add step");
         ProcessBuilder {
-            current_place: self.add_next_place(
-                name.clone(),
-                Step::Task(name, Self::wrap_function::<true, U>(func)),
-            ),
+            current_place: self
+                .add_next_place(BpmnStep::Task(name, Self::wrap_function::<true, U>(func))),
             process: self.process,
             input_type: std::marker::PhantomData,
             petri_net: self.petri_net,
             start_place: self.start_place,
             message_manager: self.message_manager,
-            used_names: self.used_names,
+            steps: self.steps,
             meta_data: self.meta_data,
         }
     }
@@ -304,25 +311,22 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
         name: impl Into<Cow<'static, str>>,
         func: impl Fn(&Token<S>, E) -> Message<P2, V> + 'static + Send + Sync,
     ) -> ProcessBuilder<P, E, S> {
-        let name: String = name.into().into();
+        let name = self.steps.add(name.into()).expect("failed to add step");
         let sender = self.message_manager.get_messages_for_process::<P2>();
         ProcessBuilder {
-            current_place: self.add_next_place(
-                name.clone(),
-                Step::Task(
-                    name,
-                    Self::wrap_function::<false, _>(move |token, value| {
-                        let message = func(token, value);
-                        sender.send(message.correlation_key, message.payload);
-                    }),
-                ),
-            ),
+            current_place: self.add_next_place(BpmnStep::Task(
+                name,
+                Self::wrap_function::<false, _>(move |token, value| {
+                    let message = func(token, value);
+                    sender.send(message.correlation_key, message.payload);
+                }),
+            )),
             process: self.process,
             input_type: std::marker::PhantomData,
             petri_net: self.petri_net,
             start_place: self.start_place,
             message_manager: self.message_manager,
-            used_names: self.used_names,
+            steps: self.steps,
             meta_data: self.meta_data,
         }
     }
@@ -333,7 +337,7 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
         gateway: G,
     ) -> [ProcessBuilder<P, E, S>; NUM] {
         gateway
-            .add_nodes(self.petri_net.write(), self.current_place)
+            .add_nodes(self.petri_net.write(), self.current_place, &self.steps)
             .map(|place| ProcessBuilder {
                 current_place: place,
                 process: self.process,
@@ -341,7 +345,7 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
                 petri_net: self.petri_net.clone(),
                 start_place: self.start_place,
                 message_manager: self.message_manager.clone(),
-                used_names: self.used_names.clone(),
+                steps: self.steps.clone(),
                 meta_data: self.meta_data.clone(),
             })
     }
@@ -351,10 +355,11 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
         mut self,
         mut waitable: W,
     ) -> ProcessBuilder<P, O, S> {
+        let name = self.steps.add(waitable.name()).expect("failed to add step");
+
         waitable.bind_messages(self.message_manager.get_messages_for_process::<P2>());
         let waitable = Arc::new(waitable);
-        let name = waitable.name().to_string();
-        let generator = Box::new(move |name: &str, state: Vec<Token<S>>| {
+        let generator = Box::new(move |name: Step, state: Vec<Token<S>>| {
             let waitable = waitable.clone();
             assert!(
                 state.len() == 1,
@@ -364,23 +369,23 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
             let value: E = token
                 .get_last()
                 .expect("the input value should be present in the token history");
-            let output_name = name.to_string();
-            let token = token.set_output(name, ());
+
+            let token = token.set_output(name.clone(), ());
             let future: Pin<Box<dyn futures::Future<Output = Vec<Token<S>>> + Send>> =
                 Box::pin(async move {
                     let output = waitable.wait_for(&token, value).await;
-                    vec![token.set_output(output_name, output)]
+                    vec![token.set_output(name.clone(), output)]
                 });
             future
         });
         ProcessBuilder {
-            current_place: self.add_next_place(name.clone(), Step::Waitable(name, generator)),
+            current_place: self.add_next_place(BpmnStep::Waitable(name, generator)),
             process: self.process,
             input_type: std::marker::PhantomData,
             petri_net: self.petri_net,
             start_place: self.start_place,
             message_manager: self.message_manager,
-            used_names: self.used_names,
+            steps: self.steps,
             meta_data: self.meta_data,
         }
     }
@@ -393,11 +398,6 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
         assert_ne!(NUM, 0, "Cannot join zero branches");
 
         let first = &parts[0];
-        let used_names = parts
-            .iter()
-            .flat_map(|part| part.used_names.iter())
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
         for part in parts.iter().skip(1) {
             assert!(
                 Arc::ptr_eq(&first.petri_net, &part.petri_net),
@@ -405,7 +405,8 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
             );
         }
         let current_places = parts.each_ref().map(|part| part.current_place);
-        let current_place = gateway.add_nodes(first.petri_net.write(), current_places);
+        let current_place =
+            gateway.add_nodes(first.petri_net.write(), current_places, &first.steps);
 
         // Deconstruct the array and discard everything except the first element.
         let first = parts.into_iter().next().unwrap();
@@ -416,7 +417,7 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
             start_place: first.start_place,
             current_place,
             message_manager: first.message_manager,
-            used_names,
+            steps: first.steps,
             meta_data: first.meta_data,
         }
     }

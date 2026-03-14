@@ -76,7 +76,7 @@ impl std::str::FromStr for ProcessName {
                 Ok(ProcessName(Cow::Owned(name.to_string()), version))
             }
             (Some(_), None) => Err(InvalidProcessNameError::MissingSeparator),
-            (Some(name), Some(_)) if name.is_empty() => Err(InvalidProcessNameError::EmptyName),
+            (Some(""), Some(_)) => Err(InvalidProcessNameError::EmptyName),
             _ => Err(InvalidProcessNameError::MissingSeparator),
         }
     }

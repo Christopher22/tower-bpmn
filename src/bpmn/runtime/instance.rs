@@ -3,8 +3,8 @@ use serde::{Serialize, ser::SerializeStruct};
 use uuid::Uuid;
 
 use crate::{
-    ExtendedExecutor, RegisteredProcess, ResumableProcess, State, Step, Storage, StorageBackend,
-    Token, Value,
+    BpmnStep, ExtendedExecutor, RegisteredProcess, ResumableProcess, State, Step, Storage,
+    StorageBackend, Token, Value,
     executor::Executor,
     petri_net::{FirstCompetingStrategy, Id, Place, Simulation},
 };
@@ -96,7 +96,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instance<E, B> {
     }
 
     /// Returns the places where this instance currently has token branches.
-    pub fn current_places(&self) -> Vec<String> {
+    pub fn current_places(&self) -> Vec<Step> {
         self.history.current_places()
     }
 }
@@ -161,7 +161,7 @@ pub struct Handle<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Handle<E, B> {
     fn new(
         executor: E,
-        simulation: Simulation<E, FirstCompetingStrategy, Step<B::Storage>, State<B::Storage>>,
+        simulation: Simulation<E, FirstCompetingStrategy, BpmnStep<B::Storage>, State<B::Storage>>,
         end: Id<Place<State<B::Storage>>>,
     ) -> Self {
         use futures::FutureExt;

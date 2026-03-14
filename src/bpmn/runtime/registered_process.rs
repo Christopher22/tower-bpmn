@@ -4,13 +4,13 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 
 use crate::{
-    CorrelationKey, ExtendedExecutor, InstanceId, InstanceSpawnError, Message, MetaData, Process,
-    ProcessBuilder, ProcessError, ProcessName, Runtime, SendError, State, Step, StorageBackend,
-    Token, Value,
+    BpmnStep, CorrelationKey, ExtendedExecutor, InstanceId, InstanceSpawnError, Message, MetaData,
+    Process, ProcessBuilder, ProcessError, ProcessName, Runtime, SendError, State, Steps,
+    StorageBackend, Token, Value,
     petri_net::{FirstCompetingStrategy, Id, PetriNet, Place, Simulation},
 };
 
-type PetriNetRef<S> = Arc<PetriNet<Step<S>, State<S>>>;
+type PetriNetRef<S> = Arc<PetriNet<BpmnStep<S>, State<S>>>;
 
 /// A registered process definition.
 #[derive(Debug, Serialize)]
@@ -19,6 +19,8 @@ pub struct RegisteredProcess<E: ExtendedExecutor<B::Storage>, B: StorageBackend>
     pub meta_data: MetaData,
     /// Schema of the value which could be passed to this process to start it.
     pub input_schema: JsonValue,
+    /// The steps of the process.
+    pub steps: Steps,
     #[serde(skip)]
     pub(crate) start: Id<Place<State<B::Storage>>>,
     #[serde(skip)]
@@ -41,6 +43,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RegisteredProcess<E, B>
         start_place: Id<Place<State<B::Storage>>>,
         current_place: Id<Place<State<B::Storage>>>,
         dynamic_api: DynamicCaller<E, B>,
+        steps: Steps,
     ) -> Self {
         Self {
             meta_data,
@@ -52,6 +55,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RegisteredProcess<E, B>
             input_schema: serde_json::to_value(schemars::schema_for!(P::Input))
                 .expect("failed to serialize process input schema"),
             dynamic_api,
+            steps,
         }
     }
 
@@ -66,13 +70,13 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RegisteredProcess<E, B>
         executor: A,
         input: V,
         shared_storage: B::Storage,
-    ) -> Simulation<A, FirstCompetingStrategy, Step<B::Storage>, State<B::Storage>> {
+    ) -> Simulation<A, FirstCompetingStrategy, BpmnStep<B::Storage>, State<B::Storage>> {
         assert_eq!(
             self.input_type,
             TypeId::of::<V>(),
             "The input type does not match the expected type for this process"
         );
-        let token = Token::new(shared_storage).set_output(crate::bpmn::START_NAME, input);
+        let token = Token::new(shared_storage).set_output(self.steps.start(), input);
         let mut simulation =
             Simulation::new(executor, self.petri_net.clone(), FirstCompetingStrategy);
         simulation[self.start] = State::Completed(token);
@@ -84,7 +88,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RegisteredProcess<E, B>
         &self,
         executor: A,
         serialized_storage: super::storage::SerializedMarking<B::Storage>,
-    ) -> Simulation<A, FirstCompetingStrategy, Step<B::Storage>, State<B::Storage>> {
+    ) -> Simulation<A, FirstCompetingStrategy, BpmnStep<B::Storage>, State<B::Storage>> {
         let mut simulation =
             Simulation::new(executor, self.petri_net.clone(), FirstCompetingStrategy);
         for entry in serialized_storage {
@@ -123,8 +127,12 @@ where
 {
     type Error = ProcessError;
     fn try_from(
-        (mut builder, dynamic_api): (ProcessBuilder<P, V, B::Storage>, DynamicCaller<E, B>),
+        (builder, dynamic_api): (ProcessBuilder<P, V, B::Storage>, DynamicCaller<E, B>),
     ) -> Result<Self, Self::Error> {
+        // Finalize the process by adding an end place.
+        let mut builder = builder.add_end();
+
+        let steps = builder.steps.build().unwrap();
         let mut petri_net = PetriNet::default();
         match Arc::get_mut(&mut builder.petri_net) {
             Some(inner_petri_net) => std::mem::swap(&mut petri_net, inner_petri_net.get_mut()),
@@ -137,6 +145,7 @@ where
             builder.start_place,
             builder.current_place,
             dynamic_api,
+            steps,
         ))
     }
 }

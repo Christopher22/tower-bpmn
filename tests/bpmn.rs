@@ -1,6 +1,6 @@
 use axum_bpmn::{
-    CorrelationKey, InMemory, IncomingMessage, Message, Process, ProcessBuilder, Runtime, Storage,
-    Token,
+    CorrelationKey, InMemory, IncomingMessage, Message, Process, ProcessBuilder, Runtime, Step,
+    Storage, Token,
 };
 use std::time::Duration;
 
@@ -110,9 +110,9 @@ impl Process for ParallelAggregationProcess {
         &self,
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
-        let [left, right] = process.split(axum_bpmn::gateways::And);
+        let [left, right] = process.split(axum_bpmn::gateways::And("AND Split".into()));
         ProcessBuilder::join(
-            axum_bpmn::gateways::And,
+            axum_bpmn::gateways::And("Join path".into()),
             [
                 left.then("left-path", |_token, value| value + 10),
                 right.then("right-path", |_token, value| value + 20),
@@ -196,14 +196,16 @@ impl Process for ExclusiveGatewayProcess {
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
         // Assuming a standard conditional API for the Exclusive gateway
-        let [high_path, low_path] =
-            process.split(axum_bpmn::gateways::Xor::for_splitting(|_, v| match v {
+        let [high_path, low_path] = process.split(axum_bpmn::gateways::Xor::for_splitting(
+            "Check size",
+            |_, v| match v {
                 ..=100 => 1,
                 _ => 0,
-            }));
+            },
+        ));
 
         ProcessBuilder::join(
-            axum_bpmn::gateways::Xor::for_joining(),
+            axum_bpmn::gateways::Xor::for_joining("Estimate result result"),
             [
                 high_path.then("high-path", |_token, _| "HIGH".to_string()),
                 low_path.then("low-path", |_token, _| "LOW".to_string()),
@@ -231,12 +233,13 @@ impl Process for NestedGatewayProcess {
         &self,
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
-        let [outer_left, outer_right] = process.split(axum_bpmn::gateways::And);
+        let [outer_left, outer_right] = process.split(axum_bpmn::gateways::And("Outer AND".into()));
 
         // Nesting an AND gateway inside the left branch
-        let [inner_left, inner_right] = outer_left.split(axum_bpmn::gateways::And);
+        let [inner_left, inner_right] =
+            outer_left.split(axum_bpmn::gateways::And("Inner AND".into()));
         let inner_join = ProcessBuilder::join(
-            axum_bpmn::gateways::And,
+            axum_bpmn::gateways::And("Inner Join".into()),
             [
                 inner_left.then("inner-add-1", |_token, v| v + 1),
                 inner_right.then("inner-add-2", |_token, v| v + 2),
@@ -246,10 +249,13 @@ impl Process for NestedGatewayProcess {
 
         let outer_right_path = outer_right.then("outer-mul", |_token, v| v * 10);
 
-        ProcessBuilder::join(axum_bpmn::gateways::And, [inner_join, outer_right_path])
-            .then("final-sum", |_token, [inner_res, outer_res]| {
-                inner_res + outer_res
-            })
+        ProcessBuilder::join(
+            axum_bpmn::gateways::And("Final Join".into()),
+            [inner_join, outer_right_path],
+        )
+        .then("final-sum", |_token, [inner_res, outer_res]| {
+            inner_res + outer_res
+        })
     }
 }
 
@@ -332,7 +338,7 @@ async fn test_sequential_execution_last_step() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(token.last_step(), Some("step-3-sub".to_string()));
+    assert_eq!(token.last_step().unwrap().as_str(), Step::END);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -380,7 +386,7 @@ async fn test_message_target_identity_behavior() {
         .unwrap();
 
     assert_eq!(token.get_last::<i32>(), Some(99));
-    assert_eq!(token.last_step(), Some("identity".to_string()));
+    assert_eq!(token.last_step().unwrap().as_str(), Step::END);
 }
 
 // --- 3. Parallel Gateway Tests ---
@@ -400,7 +406,7 @@ async fn test_parallel_gateway_join_produces_combined_data_object() {
         .unwrap();
 
     assert_eq!(token.get_last::<[i32; 2]>(), Some([13, 23]));
-    assert_eq!(token.last_step(), Some("AND Join".to_string()));
+    assert_eq!(token.last_step().unwrap().as_str(), Step::END);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -553,7 +559,7 @@ async fn test_throw_message_process_payload_extraction() {
         .unwrap()
         .unwrap();
     assert_eq!(token.get_last::<i32>(), Some(100)); // The throw process natively outputs its payload
-    assert_eq!(token.last_step(), Some("complete".to_string()));
+    assert_eq!(token.last_step().unwrap().as_str(), Step::END);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -577,7 +583,7 @@ async fn test_wait_for_message_post_processing_logic() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(token.last_step(), Some("post-process".to_string()));
+    assert_eq!(token.last_step().unwrap().as_str(), Step::END);
     assert_eq!(token.get_last::<i32>(), Some(33));
 }
 
@@ -629,7 +635,7 @@ async fn test_exclusive_gateway_routes_high_condition() {
         .unwrap();
 
     assert_eq!(token.get_last::<String>(), Some("HIGH".to_string()));
-    assert_eq!(token.last_step(), Some("XOR Join".to_string())); // Or engine equivalent
+    assert_eq!(token.last_step().unwrap().as_str(), Step::END);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -754,5 +760,5 @@ async fn test_throw_message_ends_cleanly_after_emission() {
         .unwrap();
 
     assert_eq!(token.get_last::<i32>(), Some(99));
-    assert_eq!(token.last_step(), Some("complete".to_string()));
+    assert_eq!(token.last_step().unwrap().as_str(), Step::END);
 }

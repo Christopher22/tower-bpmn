@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use std::any::Any;
 
-use crate::Storage;
+use crate::{Step, Storage};
 
 /// Marker trait for values that can be stored in token history and messages.
 pub trait Value:
@@ -82,8 +82,7 @@ impl<S: Storage> Token<S> {
     }
 
     /// Adds a typed output value for the given step and returns the updated token.
-    pub fn set_output<T: Value, ST: AsRef<str>>(self, step: ST, value: T) -> Self {
-        let step = step.as_ref();
+    pub fn set_output<T: Value>(self, step: Step, value: T) -> Self {
         self.storage.add(self.id(), step, value);
         self
     }
@@ -94,7 +93,7 @@ impl<S: Storage> Token<S> {
     }
 
     /// Returns the name of the last step finished by this token.
-    pub fn last_step(&self) -> Option<String> {
+    pub fn last_step(&self) -> Option<Step> {
         self.storage.last_step(&self.ids)
     }
 }
@@ -118,25 +117,28 @@ impl<S: Clone> Clone for Token<S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::InMemoryStorage;
+    use crate::{InMemoryStorage, Steps};
 
     use super::*;
 
     #[test]
     fn token_history_returns_latest_value_and_task() {
+        let steps = Steps::new(["step-a", "step-b", "step-c"].into_iter()).unwrap();
         let token = Token::new(InMemoryStorage::for_test())
-            .set_output("step-a", 1_i32)
-            .set_output("step-b", 2_i32)
-            .set_output("step-c", 3_i32);
+            .set_output(steps.get("step-a").unwrap(), 1_i32)
+            .set_output(steps.get("step-b").unwrap(), 2_i32)
+            .set_output(steps.get("step-c").unwrap(), 3_i32);
 
         assert_eq!(token.get_last::<i32>(), Some(3));
-        assert_eq!(token.last_step(), Some("step-c".into()));
+        assert_eq!(token.last_step(), Some(steps.get("step-c").unwrap()));
     }
 
     #[test]
     fn token_child_branch_keeps_parent_history_visible() {
-        let root = Token::new(InMemoryStorage::for_test()).set_output("root", 5_i32);
-        let child = root.fork().set_output("child", 9_i32);
+        let steps = Steps::new(["root", "child"].into_iter()).unwrap();
+        let root =
+            Token::new(InMemoryStorage::for_test()).set_output(steps.get("root").unwrap(), 5_i32);
+        let child = root.fork().set_output(steps.get("child").unwrap(), 9_i32);
 
         assert_eq!(root.get_last::<i32>(), Some(5));
         assert_eq!(child.get_last::<i32>(), Some(9));
@@ -144,15 +146,19 @@ mod tests {
 
     #[test]
     fn shared_history_tracks_current_places_for_active_branches() {
+        let steps = Steps::new(["start", "root-step", "child-step"].into_iter()).unwrap();
         let root = Token::new(InMemoryStorage::for_test())
-            .set_output("start", 1_i32)
-            .set_output("root-step", 2_i32);
-        let child = root.fork().set_output("child-step", 3_i32);
+            .set_output(steps.get("start").unwrap(), 1_i32)
+            .set_output(steps.get("root-step").unwrap(), 2_i32);
+        let child = root
+            .fork()
+            .set_output(steps.get("child-step").unwrap(), 3_i32);
 
-        assert_eq!(
-            root.storage.current_places(),
-            vec!["child-step".to_string(), "root-step".to_string()]
-        );
-        assert_eq!(child.last_step(), Some("child-step".into()));
+        let current_places = root.storage.current_places();
+        assert_eq!(current_places.len(), 2);
+        assert!(current_places.contains(&steps.get("root-step").unwrap()));
+        assert!(current_places.contains(&steps.get("child-step").unwrap()));
+
+        assert_eq!(child.last_step(), Some(steps.get("child-step").unwrap()));
     }
 }

@@ -1,7 +1,8 @@
-use std::ops::DerefMut;
+use std::{borrow::Cow, ops::DerefMut};
 
 use crate::{
-    Storage,
+    Step, Storage,
+    bpmn::StepsBuilder,
     petri_net::{Id, PetriNet, Place},
 };
 
@@ -15,8 +16,9 @@ pub trait SplitableGateway<S: Storage>: Gateway<S> {
     /// Adds the required Petri-net nodes for this split gateway.
     fn add_nodes<const NUM: usize>(
         &self,
-        petri_net: impl DerefMut<Target = PetriNet<super::Step<S>, super::State<S>>>,
+        petri_net: impl DerefMut<Target = PetriNet<super::BpmnStep<S>, super::State<S>>>,
         current_place: Id<Place<super::State<S>>>,
+        steps: &StepsBuilder,
     ) -> [Id<Place<super::State<S>>>; NUM];
 }
 
@@ -28,26 +30,31 @@ pub trait JoinableGateway<const NUM: usize, V: Value, S: Storage>: Gateway<S> {
     /// Adds the required Petri-net nodes for this join gateway.
     fn add_nodes(
         self,
-        petri_net: impl DerefMut<Target = PetriNet<super::Step<S>, super::State<S>>>,
+        petri_net: impl DerefMut<Target = PetriNet<super::BpmnStep<S>, super::State<S>>>,
         current_places: [Id<Place<super::State<S>>>; NUM],
+        steps: &StepsBuilder,
     ) -> Id<Place<super::State<S>>>;
 }
 
 /// The BPMN "XOR" gateway, which can be used for both splitting and joining. For splitting, exactly one output branch will be executed based on the callback function. For joining, the gateway will wait until one of the input branches is completed before proceeding.
 #[derive(Debug)]
-pub struct Xor<C: 'static, V: Value, S: Storage>(C, std::marker::PhantomData<fn(S) -> V>);
+pub struct Xor<C: 'static, V: Value, S: Storage>(
+    Cow<'static, str>,
+    C,
+    std::marker::PhantomData<fn(S) -> V>,
+);
 
 impl<V: Value, S: Storage> Xor<(), V, S> {
     /// Creates an XOR gateway configured for joining branches.
-    pub fn for_joining() -> Self {
-        Xor((), std::marker::PhantomData)
+    pub fn for_joining(name: impl Into<Cow<'static, str>>) -> Self {
+        Xor(name.into(), (), std::marker::PhantomData)
     }
 }
 
 impl<S: Storage, C: Fn(&super::Token<S>, V) -> usize, V: Value> Xor<C, V, S> {
     /// Creates an XOR gateway configured for splitting branches.
-    pub fn for_splitting(callback: C) -> Self {
-        Xor(callback, std::marker::PhantomData)
+    pub fn for_splitting(name: impl Into<Cow<'static, str>>, callback: C) -> Self {
+        Xor(name.into(), callback, std::marker::PhantomData)
     }
 }
 
@@ -58,19 +65,21 @@ impl<S: Storage, const NUM: usize, V: Value> JoinableGateway<NUM, V, S> for Xor<
 
     fn add_nodes(
         self,
-        mut petri_net: impl DerefMut<Target = PetriNet<super::Step<S>, super::State<S>>>,
+        mut petri_net: impl DerefMut<Target = PetriNet<super::BpmnStep<S>, super::State<S>>>,
         current_places: [Id<Place<super::State<S>>>; NUM],
+        steps: &StepsBuilder,
     ) -> Id<Place<super::State<S>>> {
         let petri_net = petri_net.deref_mut();
-        let output = petri_net.add_place(Place::new("XOR Join Output", super::State::Inactive));
+        let output = petri_net.add_place(Place::new((), super::State::Inactive));
 
-        for (_, place) in current_places.into_iter().enumerate() {
-            let transition = petri_net.add_transition(super::Step::Task(
-                "XOR Join".to_string(),
-                Box::new(|name: &str, state: Vec<super::Token<S>>| {
+        let join_name = steps.add(self.0).expect("valid name");
+        for place in current_places.into_iter() {
+            let transition = petri_net.add_transition(super::BpmnStep::Task(
+                join_name.clone(),
+                Box::new(|name: Step, state: Vec<super::Token<S>>| {
                     state
                         .into_iter()
-                        .map(|token| token.set_output(name, ()))
+                        .map(|token| token.set_output(name.clone(), ()))
                         .collect()
                 }),
             ));
@@ -87,21 +96,19 @@ impl<S: Storage, V: Value, C: Fn(&super::Token<S>, V) -> usize + Clone + Sync + 
 {
     fn add_nodes<const NUM: usize>(
         &self,
-        mut petri_net: impl DerefMut<Target = PetriNet<super::Step<S>, super::State<S>>>,
+        mut petri_net: impl DerefMut<Target = PetriNet<super::BpmnStep<S>, super::State<S>>>,
         current_place: Id<Place<super::State<S>>>,
+        steps: &StepsBuilder,
     ) -> [Id<Place<super::State<S>>>; NUM] {
         let petri_net = petri_net.deref_mut();
         std::array::from_fn(|i| {
-            let new_place = petri_net.add_place(Place::new(
-                format!("XOR Output {i}"),
-                super::State::Inactive,
-            ));
+            let new_place = petri_net.add_place(Place::new((), super::State::Inactive));
             // Use XorBranch so that only the selected branch transition is enabled
             // according to the BPMN XOR-split standard: exactly one outgoing path fires.
-            let transition = petri_net.add_transition(super::Step::XorBranch(
-                format!("XOR Transition {i}"),
+            let transition = petri_net.add_transition(super::BpmnStep::XorBranch(
+                steps.add(format!("{}: {}", self.0, i)).expect("valid name"),
                 Box::new({
-                    let callback = self.0.clone();
+                    let callback = self.1.clone();
                     move |token: &super::Token<S>| {
                         let value = token
                             .get_last::<V>()
@@ -118,26 +125,24 @@ impl<S: Storage, V: Value, C: Fn(&super::Token<S>, V) -> usize + Clone + Sync + 
 }
 
 /// The BPMN "AND" gateway, which can be used for both splitting and joining. For splitting, all output branches will be executed in parallel. For joining, the gateway will wait until all input branches are completed before proceeding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct And;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct And(pub Cow<'static, str>);
 
 impl<S: Storage> Gateway<S> for And {}
 
 impl<S: Storage> SplitableGateway<S> for And {
     fn add_nodes<const NUM: usize>(
         &self,
-        mut petri_net: impl DerefMut<Target = PetriNet<super::Step<S>, super::State<S>>>,
+        mut petri_net: impl DerefMut<Target = PetriNet<super::BpmnStep<S>, super::State<S>>>,
         current_place: Id<Place<super::State<S>>>,
+        _: &StepsBuilder,
     ) -> [Id<Place<super::State<S>>>; NUM] {
         let petri_net = petri_net.deref_mut();
-        let transition_and = petri_net.add_transition(super::Step::And(NUM));
+        let transition_and = petri_net.add_transition(super::BpmnStep::And(NUM));
         petri_net.connect_place(current_place, transition_and, ());
 
-        std::array::from_fn(|i| {
-            let next_place = petri_net.add_place(Place::new(
-                format!("AND Output {i}"),
-                super::State::Inactive,
-            ));
+        std::array::from_fn(|_| {
+            let next_place = petri_net.add_place(Place::new((), super::State::Inactive));
             petri_net.connect_transition(transition_and, next_place, ());
             next_place
         })
@@ -152,15 +157,16 @@ where
 
     fn add_nodes(
         self,
-        mut petri_net: impl DerefMut<Target = PetriNet<super::Step<S>, super::State<S>>>,
+        mut petri_net: impl DerefMut<Target = PetriNet<super::BpmnStep<S>, super::State<S>>>,
         current_places: [Id<Place<super::State<S>>>; NUM],
+        steps: &StepsBuilder,
     ) -> Id<Place<super::State<S>>> {
         let petri_net = petri_net.deref_mut();
-        let output = petri_net.add_place(Place::new("AND Join Output", super::State::Inactive));
+        let output = petri_net.add_place(Place::new((), super::State::Inactive));
 
-        let transition = petri_net.add_transition(super::Step::Task(
-            "AND Join".to_string(),
-            Box::new(|name: &str, state: Vec<super::Token<S>>| {
+        let transition = petri_net.add_transition(super::BpmnStep::Task(
+            steps.add(self.0).expect("valid name"),
+            Box::new(|name: Step, state: Vec<super::Token<S>>| {
                 assert_eq!(
                     state.len(),
                     NUM,
