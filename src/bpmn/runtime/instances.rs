@@ -1,4 +1,5 @@
 use dashmap::DashMap;
+use serde::ser::{SerializeSeq, SerializeStruct};
 
 use crate::{
     ExtendedExecutor, Instance, InstanceId, RegisteredProcess, ResumeError, StorageBackend, Value,
@@ -68,6 +69,59 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instances<E, B> {
         let id = instance.id;
         self.instances.insert(id, instance);
         Ok(id)
+    }
+}
+
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> serde::Serialize for Instances<E, B> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut serializer = serializer.serialize_struct("Instances", 1)?;
+        struct InstanceList<'a, E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
+            &'a DashMap<InstanceId, Instance<E, B>>,
+        );
+
+        impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> serde::Serialize
+            for InstanceList<'_, E, B>
+        {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+                for instance in self.0.iter() {
+                    sequence.serialize_element(instance.value())?;
+                }
+                sequence.end()
+            }
+        }
+
+        serializer.serialize_field("instances", &InstanceList(&self.instances))?;
+        serializer.end()
+    }
+}
+
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> schemars::JsonSchema for Instances<E, B> {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Instances".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::Instance").into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "properties": {
+                "instances": {
+                    "type": "array",
+                    "items": generator.subschema_for::<Instance<E, B>>()
+                }
+            },
+            "required": ["instances"],
+        })
     }
 }
 

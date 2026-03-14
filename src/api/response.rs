@@ -1,12 +1,13 @@
 use http::{Response, StatusCode, header::CONTENT_TYPE};
 use http_body::Body;
 use http_body_util::BodyExt;
-use schemars::{JsonSchema, json_schema};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::{
-    CorrelationKey, ExtendedExecutor, Instance, InstanceId, MetaData, Runtime, StorageBackend,
+    CorrelationKey, ExtendedExecutor, Instance, InstanceId, Instances, MetaData, ProcessName,
+    Runtime, StorageBackend,
 };
 
 use super::error::ApiError;
@@ -40,18 +41,12 @@ impl Default for AcceptedResponse {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub(super) struct ProcessListResponse {
-    pub(super) processes: Vec<String>,
+    pub(super) processes: Vec<ProcessName>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub(super) struct ProcessMetadataResponse {
     pub(super) process: MetaData,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub(super) struct InstancePlacesResponse {
-    pub(super) instance_id: InstanceId,
-    pub(super) places: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -265,56 +260,6 @@ pub fn openapi<E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
         },
     );
 
-    let mut instance_get = openapi_operation("Get instance state");
-    instance_get.parameters.push(OpenApiParameter {
-        name: "instance_id",
-        in_location: "path",
-        required: true,
-        schema: schema_for::<InstanceId>(),
-    });
-    instance_get.responses.insert(
-        "200".to_string(),
-        schema_response("Instance state", "RuntimeInstance"),
-    );
-    instance_get.responses.insert(
-        "404".to_string(),
-        schema_response("Instance not found", "ErrorBody"),
-    );
-    paths.insert(
-        "/instances/{instance_id}".to_string(),
-        PathItem {
-            get: Some(instance_get),
-            post: None,
-        },
-    );
-
-    let mut instance_places_get = openapi_operation("Get current places for an instance");
-    instance_places_get.parameters.push(OpenApiParameter {
-        name: "instance_id",
-        in_location: "path",
-        required: true,
-        schema: schema_for::<InstanceId>(),
-    });
-    instance_places_get.responses.insert(
-        "200".to_string(),
-        schema_response("Current instance places", "InstancePlacesResponse"),
-    );
-    instance_places_get.responses.insert(
-        "400".to_string(),
-        schema_response("Invalid instance id", "ErrorBody"),
-    );
-    instance_places_get.responses.insert(
-        "404".to_string(),
-        schema_response("Instance not found", "ErrorBody"),
-    );
-    paths.insert(
-        "/instances/{instance_id}/places".to_string(),
-        PathItem {
-            get: Some(instance_places_get),
-            post: None,
-        },
-    );
-
     for process in runtime.registered_processes() {
         let mut process_get = openapi_operation("Get process metadata");
         process_get.responses.insert(
@@ -358,7 +303,7 @@ pub fn openapi<E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
         let mut instances_get = openapi_operation("List running instances for a process");
         instances_get.responses.insert(
             "200".to_string(),
-            schema_response("Running instances", "ProcessInstancesResponse"),
+            schema_response("Running instances", "Instances"),
         );
         instances_get.responses.insert(
             "404".to_string(),
@@ -436,29 +381,8 @@ pub fn openapi<E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
                 "ProcessMetadataResponse".to_string(),
                 schema_for::<ProcessMetadataResponse>(),
             ),
-            (
-                "ProcessInstancesResponse".to_string(),
-                json_schema!({
-                    "type": "object",
-                    "properties": {
-                        "instances": {
-                            "type": "array",
-                            "items": schema_ref("RuntimeInstance"),
-                        },
-                    },
-                    "required": ["instances"],
-                    "additionalProperties": false,
-                })
-                .into(),
-            ),
-            (
-                "InstancePlacesResponse".to_string(),
-                schema_for::<InstancePlacesResponse>(),
-            ),
-            (
-                "RuntimeInstance".to_string(),
-                schema_for::<Instance<E, B>>(),
-            ),
+            ("Instances".to_string(), schema_for::<Instances<E, B>>()),
+            ("Instance".to_string(), schema_for::<Instance<E, B>>()),
             ("ErrorBody".to_string(), schema_for::<ErrorBody>()),
         ]
         .into_iter()

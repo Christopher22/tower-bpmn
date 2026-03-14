@@ -7,7 +7,9 @@ mod token;
 use serde_json::Value as JsonValue;
 use std::{any::TypeId, collections::HashMap};
 
-use crate::{ExtendedExecutor, Message, MessageManager, Process, ProcessBuilder, SendError};
+use crate::{
+    ExtendedExecutor, Message, MessageManager, Process, ProcessBuilder, ProcessName, SendError,
+};
 
 pub use instance::{Handle, Instance, InstanceId, InstanceNotRunning, InstanceStatus};
 pub use instances::{InstanceSpawnError, Instances};
@@ -19,7 +21,7 @@ pub use token::{Token, TokenId, Value};
 
 /// Runtime that stores process definitions and starts process instances.
 pub struct Runtime<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
-    registered_processes: HashMap<String, Instances<E, B>>,
+    registered_processes: HashMap<ProcessName, Instances<E, B>>,
     message_manager: MessageManager,
     executor: E,
     storage_backend: B,
@@ -42,7 +44,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
         process: P,
     ) -> Result<(), ProcessError> {
         let metadata = process.metadata().clone();
-        let process_name = metadata.name.to_string();
+        let process_name = ProcessName::from(&metadata);
         // Prepare dynamic dispatch
         let process_for_start = process.clone();
         let process_for_message = process.clone();
@@ -68,18 +70,16 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
             .map(|value| &value.registered_process)
     }
 
-    /// Return all tracked process instances.
-    pub fn instances(&self) -> impl Iterator<Item = &Instances<E, B>> {
-        self.registered_processes.values()
+    /// Query a registered process by its name. Returns None if the process is not found.
+    pub fn get_registered_process(&self, name: &ProcessName) -> Option<&RegisteredProcess<E, B>> {
+        self.registered_processes
+            .get(name)
+            .map(|instances| &instances.registered_process)
     }
 
-    /// Returns the places where the specified instance currently has token branches.
-    pub fn instance_places(&self, instance_id: InstanceId) -> Option<Vec<String>> {
-        self.instances().find_map(|instances| {
-            instances
-                .get(instance_id)
-                .map(|instance| instance.current_places())
-        })
+    /// Query the instances of a registered process by its name. Returns None if the process is not found.
+    pub fn get_instances(&self, process_name: &ProcessName) -> Option<&Instances<E, B>> {
+        self.registered_processes.get(process_name)
     }
 
     /// Wait for a specific instance to complete and return the final context. Returns None if the instance is not found, or Some(Err) if the instance is not running.
@@ -101,12 +101,12 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
     /// Starts a registered process by its name using JSON input.
     pub fn run_dynamic(
         &self,
-        process_name: &str,
+        process_name: ProcessName,
         input: JsonValue,
     ) -> Result<InstanceId, RuntimeApiError> {
         let process = self
             .registered_processes
-            .get(process_name)
+            .get(&process_name)
             .ok_or(RuntimeApiError::Unregistered)?;
         process.registered_process.run_dynamic(self, input)
     }
@@ -114,13 +114,13 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
     /// Sends a message to a registered process by name using JSON payload.
     pub fn send_message_dynamic(
         &self,
-        process_name: &str,
+        process_name: ProcessName,
         correlation_key: super::CorrelationKey,
         payload: JsonValue,
     ) -> Result<(), RuntimeApiError> {
         let process = self
             .registered_processes
-            .get(process_name)
+            .get(&process_name)
             .ok_or(RuntimeApiError::Unregistered)?;
         process
             .registered_process
@@ -136,7 +136,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
     ) -> Result<InstanceId, InstanceSpawnError> {
         match self
             .registered_processes
-            .get(process.metadata().name.as_ref())
+            .get(&ProcessName::from(process.metadata()))
         {
             Some(registered_process)
                 if registered_process.registered_process.process_type == TypeId::of::<P>() =>

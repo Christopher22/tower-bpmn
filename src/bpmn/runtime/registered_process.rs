@@ -5,7 +5,8 @@ use serde_json::Value as JsonValue;
 
 use crate::{
     CorrelationKey, ExtendedExecutor, InstanceId, InstanceSpawnError, Message, MetaData, Process,
-    ProcessBuilder, ProcessError, Runtime, SendError, State, Step, StorageBackend, Token, Value,
+    ProcessBuilder, ProcessError, ProcessName, Runtime, SendError, State, Step, StorageBackend,
+    Token, Value,
     petri_net::{FirstCompetingStrategy, Id, PetriNet, Place, Simulation},
 };
 
@@ -144,7 +145,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> std::fmt::Display
     for RegisteredProcess<E, B>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.meta_data.name)
+        write!(f, "{}", ProcessName::from(&self.meta_data))
     }
 }
 

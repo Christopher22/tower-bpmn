@@ -1,7 +1,6 @@
 use std::{
     convert::Infallible,
     future::Future,
-    ops::Deref,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -12,15 +11,15 @@ use http_body::Body;
 use parking_lot::RwLock;
 use tower_service::Service;
 
-use crate::{ExtendedExecutor, InstanceId, Runtime, StorageBackend};
+use crate::{ExtendedExecutor, ProcessName, Runtime, StorageBackend};
 
 use super::{
     error::ApiError,
     openapi,
     response::{
-        AcceptedResponse, InstancePlacesResponse, ProcessListResponse, ProcessMetadataResponse,
-        SendMessageRequest, StartInstanceRequest, StartInstanceResponse, decode_json_payload,
-        json_response, parse_json_body,
+        AcceptedResponse, ProcessListResponse, ProcessMetadataResponse, SendMessageRequest,
+        StartInstanceRequest, StartInstanceResponse, decode_json_payload, json_response,
+        parse_json_body,
     },
 };
 
@@ -30,16 +29,106 @@ pub struct Api<E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
     Arc<(&'static str, RwLock<Runtime<E, B>>)>,
 );
 
-impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> std::fmt::Debug for Api<E, B> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Api").finish_non_exhaustive()
-    }
-}
-
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Api<E, B> {
     /// Creates a new API service with the given runtime.
     pub fn new(entry_point: &'static str, runtime: Runtime<E, B>) -> Self {
         Api(Arc::new((entry_point, RwLock::new(runtime))))
+    }
+
+    async fn handle_request<Bo: Body + Send + 'static>(
+        api_entry_point: &str,
+        runtime: &RwLock<Runtime<E, B>>,
+        request: Request<Bo>,
+    ) -> Result<Response<String>, ApiError>
+    where
+        Bo::Data: bytes::Buf + Send,
+        Bo::Error: std::fmt::Display,
+    {
+        let (parts, body) = request.into_parts();
+        let method = parts.method;
+        let segments: Vec<&str> = parts
+            .uri
+            .path()
+            .trim_matches('/')
+            .split('/')
+            .take_while(|value| *value != api_entry_point)
+            .collect();
+
+        match (method.as_str(), segments.as_slice()) {
+            ("GET", []) => {
+                let runtime = runtime.read();
+                Ok(json_response(StatusCode::OK, &openapi(&runtime)))
+            }
+            ("GET", ["processes"]) => {
+                let runtime = runtime.read();
+                Ok(json_response(
+                    StatusCode::OK,
+                    &ProcessListResponse {
+                        processes: runtime
+                            .registered_processes()
+                            .map(|value| ProcessName::from(&value.meta_data))
+                            .collect(),
+                    },
+                ))
+            }
+            ("GET", ["processes", process_name]) => {
+                let process_name = process_name.parse::<ProcessName>()?;
+                Ok(json_response(
+                    StatusCode::OK,
+                    &ProcessMetadataResponse {
+                        process: runtime
+                            .read()
+                            .get_registered_process(&process_name)
+                            .ok_or_else(|| ApiError::not_found("unknown process"))?
+                            .meta_data
+                            .clone(),
+                    },
+                ))
+            }
+            ("POST", ["processes", process_name, "instances"]) => {
+                let request: StartInstanceRequest =
+                    parse_json_body(body).await.and_then(decode_json_payload)?;
+                let process_name = process_name.parse::<ProcessName>()?;
+
+                Ok(json_response(
+                    StatusCode::ACCEPTED,
+                    &StartInstanceResponse {
+                        instance_id: runtime.read().run_dynamic(process_name, request.input)?,
+                    },
+                ))
+            }
+            ("GET", ["processes", process_name, "instances"]) => {
+                let process_name = process_name.parse::<ProcessName>()?;
+                Ok(json_response(
+                    StatusCode::OK,
+                    runtime
+                        .read()
+                        .get_instances(&process_name)
+                        .ok_or_else(|| ApiError::not_found("unknown process"))?,
+                ))
+            }
+            ("POST", ["processes", process_name, "messages"]) => {
+                let request: SendMessageRequest =
+                    parse_json_body(body).await.and_then(decode_json_payload)?;
+                runtime.read().send_message_dynamic(
+                    process_name.parse::<ProcessName>()?,
+                    request.correlation_key,
+                    request.payload,
+                )?;
+
+                Ok(json_response(
+                    StatusCode::ACCEPTED,
+                    &AcceptedResponse::default(),
+                ))
+            }
+            _ => Err(ApiError::not_found("route not found")),
+        }
+    }
+}
+
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> std::fmt::Debug for Api<E, B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Api").finish_non_exhaustive()
     }
 }
 
@@ -62,127 +151,10 @@ where
         let state = self.0.clone();
         Box::pin(async move {
             let (api_entry_point, runtime) = &*state;
-            let (parts, body) = req.into_parts();
-            let method = parts.method;
-            let segments: Vec<&str> = parts
-                .uri
-                .path()
-                .trim_matches('/')
-                .split('/')
-                .take_while(|value| value != api_entry_point)
-                .collect();
-
-            let response = match (method.as_str(), segments.as_slice()) {
-                ("GET", []) => {
-                    let runtime = runtime.read();
-                    json_response(StatusCode::OK, &openapi(&runtime))
-                }
-                ("GET", ["processes"]) => {
-                    let runtime = runtime.read();
-                    json_response(
-                        StatusCode::OK,
-                        &ProcessListResponse {
-                            processes: runtime
-                                .registered_processes()
-                                .map(|value| value.meta_data.name.to_string())
-                                .collect(),
-                        },
-                    )
-                }
-                ("GET", ["processes", process_name]) => {
-                    let runtime = runtime.read();
-                    match runtime
-                        .registered_processes()
-                        .find(|value| value.meta_data.name == *process_name)
-                        .map(|process| process.meta_data.clone())
-                    {
-                        Some(process) => {
-                            json_response(StatusCode::OK, &ProcessMetadataResponse { process })
-                        }
-                        None => ApiError::not_found("unknown process").into_response(),
-                    }
-                }
-                ("POST", ["processes", process_name, "instances"]) => {
-                    let request: StartInstanceRequest =
-                        match parse_json_body(body).await.and_then(decode_json_payload) {
-                            Ok(request) => request,
-                            Err(err) => return Ok(err.into_response()),
-                        };
-
-                    let runtime = runtime.read();
-                    match runtime.run_dynamic(process_name, request.input) {
-                        Ok(instance_id) => json_response(
-                            StatusCode::ACCEPTED,
-                            &StartInstanceResponse { instance_id },
-                        ),
-                        Err(err) => ApiError::from_runtime_api_error(err).into_response(),
-                    }
-                }
-                ("GET", ["processes", process_name, "instances"]) => {
-                    let runtime = runtime.read();
-                    match runtime
-                        .instances()
-                        .find(|p| p.registered_process.meta_data.name == *process_name)
-                    {
-                        Some(instances) => json_response(
-                            StatusCode::OK,
-                            &serde_json::json!({
-                                "instances": instances
-                                            .iter()
-                                            .map(|instance| {
-                                                serde_json::to_value(instance.deref())
-                                                    .expect("unable to serialize instance")
-                                            })
-                                            .collect::<Vec<_>>(),
-                            }),
-                        ),
-                        None => ApiError::not_found("unknown process").into_response(),
-                    }
-                }
-                ("GET", ["instances", instance_id, "places"]) => {
-                    let instance_id = match instance_id.parse::<InstanceId>() {
-                        Ok(instance_id) => instance_id,
-                        Err(err) => {
-                            return Ok(ApiError::bad_request(format!(
-                                "invalid instance id: {err}"
-                            ))
-                            .into_response());
-                        }
-                    };
-
-                    let runtime = runtime.read();
-                    match runtime.instance_places(instance_id) {
-                        Some(places) => json_response(
-                            StatusCode::OK,
-                            &InstancePlacesResponse {
-                                instance_id,
-                                places,
-                            },
-                        ),
-                        None => ApiError::not_found("unknown instance").into_response(),
-                    }
-                }
-                ("POST", ["processes", process_name, "messages"]) => {
-                    let request: SendMessageRequest =
-                        match parse_json_body(body).await.and_then(decode_json_payload) {
-                            Ok(request) => request,
-                            Err(err) => return Ok(err.into_response()),
-                        };
-
-                    let runtime = runtime.read();
-                    match runtime.send_message_dynamic(
-                        process_name,
-                        request.correlation_key,
-                        request.payload,
-                    ) {
-                        Ok(()) => json_response(StatusCode::ACCEPTED, &AcceptedResponse::default()),
-                        Err(err) => ApiError::from_runtime_api_error(err).into_response(),
-                    }
-                }
-                _ => ApiError::not_found("route not found").into_response(),
-            };
-
-            Ok(response)
+            match Self::handle_request(api_entry_point, runtime, req).await {
+                Ok(response) => Ok(response),
+                Err(err) => Ok(err.into_response()),
+            }
         })
     }
 }

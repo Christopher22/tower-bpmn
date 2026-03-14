@@ -16,7 +16,7 @@ use std::{borrow::Cow, ops::IndexMut};
 use crate::executor::Executor;
 
 pub use self::messages::{CorrelationKey, Message, MessageManager, ProcessMessages, SendError};
-pub use self::process::{MetaData, Process};
+pub use self::process::{InvalidProcessNameError, MetaData, Process, ProcessName};
 pub use self::runtime::{
     Handle, InMemory, InMemoryStorage, Instance, InstanceId, InstanceNotRunning,
     InstanceSpawnError, InstanceStatus, Instances, ProcessError, RegisteredProcess,

@@ -1,6 +1,6 @@
 use http::{Response, StatusCode};
 
-use crate::{InstanceSpawnError, RuntimeApiError, SendError};
+use crate::{InstanceSpawnError, InvalidProcessNameError, RuntimeApiError, SendError};
 
 use super::response::{ErrorBody, json_response};
 
@@ -32,32 +32,6 @@ impl ApiError {
         }
     }
 
-    fn from_instance_error(error: InstanceSpawnError) -> Self {
-        match error {
-            InstanceSpawnError::Unregistered => Self::not_found("unknown process"),
-            InstanceSpawnError::Completed => Self::conflict("instance already completed"),
-            InstanceSpawnError::InvalidContext => Self::bad_request("invalid process context"),
-        }
-    }
-
-    fn from_send_error(error: SendError) -> Self {
-        match error {
-            SendError::NoTarget => Self::conflict("no waiting instance for this message"),
-            SendError::InvalidType => Self::bad_request("invalid message type"),
-        }
-    }
-
-    pub(super) fn from_runtime_api_error(error: RuntimeApiError) -> Self {
-        match error {
-            RuntimeApiError::Unregistered => Self::not_found("unknown process"),
-            RuntimeApiError::InvalidPayload(message) => {
-                Self::bad_request(format!("invalid request payload: {message}"))
-            }
-            RuntimeApiError::Instance(error) => Self::from_instance_error(error),
-            RuntimeApiError::Send(error) => Self::from_send_error(error),
-        }
-    }
-
     pub(super) fn into_response(self) -> Response<String> {
         json_response(
             self.status,
@@ -65,5 +39,49 @@ impl ApiError {
                 error: self.message,
             },
         )
+    }
+}
+
+impl From<InstanceSpawnError> for ApiError {
+    fn from(error: InstanceSpawnError) -> Self {
+        match error {
+            InstanceSpawnError::Unregistered => Self::not_found("unknown process"),
+            InstanceSpawnError::Completed => Self::conflict("instance already completed"),
+            InstanceSpawnError::InvalidContext => Self::bad_request("invalid process context"),
+        }
+    }
+}
+
+impl From<SendError> for ApiError {
+    fn from(error: SendError) -> Self {
+        match error {
+            SendError::NoTarget => Self::conflict("no waiting instance for this message"),
+            SendError::InvalidType => Self::bad_request("invalid message type"),
+        }
+    }
+}
+
+impl From<RuntimeApiError> for ApiError {
+    fn from(error: RuntimeApiError) -> Self {
+        match error {
+            RuntimeApiError::Unregistered => Self::not_found("unknown process"),
+            RuntimeApiError::InvalidPayload(message) => {
+                Self::bad_request(format!("invalid request payload: {message}"))
+            }
+            RuntimeApiError::Instance(error) => error.into(),
+            RuntimeApiError::Send(error) => error.into(),
+        }
+    }
+}
+
+impl From<InvalidProcessNameError> for ApiError {
+    fn from(error: InvalidProcessNameError) -> Self {
+        Self::bad_request(format!("invalid process name: {error}"))
+    }
+}
+
+impl From<uuid::Error> for ApiError {
+    fn from(error: uuid::Error) -> Self {
+        Self::bad_request(format!("invalid instance id: {error}"))
     }
 }

@@ -8,7 +8,7 @@ use chrono::DateTime;
 use dashmap::DashMap;
 
 use crate::{
-    ExtendedExecutor, InstanceId, RegisteredProcess, State, Token, TokenId, Value,
+    ExtendedExecutor, InstanceId, ProcessName, RegisteredProcess, State, Token, TokenId, Value,
     petri_net::{Id, Place},
 };
 
@@ -32,7 +32,7 @@ pub trait StorageBackend: 'static + Clone + Sized + Send + Sync {
     ) -> Result<ResumableProcess<Self>, ResumeError>;
 
     /// Yield a list of all paused instances which could be resumed, along with the name of the process they belong to.
-    fn paused_instances(&self) -> Vec<(String, InstanceId)>;
+    fn paused_instances(&self) -> Vec<(ProcessName, InstanceId)>;
 }
 
 /// A serialized marking which could be used to resume an instance.
@@ -121,7 +121,7 @@ impl StorageBackend for InMemory {
         Err(ResumeError::NotFound)
     }
 
-    fn paused_instances(&self) -> Vec<(String, InstanceId)> {
+    fn paused_instances(&self) -> Vec<(ProcessName, InstanceId)> {
         Vec::new()
     }
 }
