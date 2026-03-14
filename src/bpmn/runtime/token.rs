@@ -107,6 +107,15 @@ impl<S> PartialEq for Token<S> {
 
 impl<S> Eq for Token<S> {}
 
+impl<S: Clone> Clone for Token<S> {
+    fn clone(&self) -> Self {
+        Token {
+            ids: self.ids.clone(),
+            storage: self.storage.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::InMemoryStorage;

@@ -15,16 +15,19 @@ pub trait Color: 'static + Eq + Sized + Default + std::fmt::Debug + Clone {
     type Id: std::fmt::Debug;
 
     /// Check if the transition can fire given the marking.
-    fn is_transition_enabled<A>(transition: &Transition<A, Self>, marking: &Marking<Self>) -> bool;
+    fn is_transition_enabled<A: 'static>(
+        transition: &Transition<A, Self>,
+        marking: &Marking<Self>,
+    ) -> bool;
 
     /// Update the marking by firing the given transition, iff it is enabled.
-    fn update_input<A>(
+    fn update_input<A: 'static>(
         transition: &Transition<A, Self>,
         marking: &mut Marking<Self>,
     ) -> Option<Self::State>;
 
     /// Update the marking by adding tokens from the given transition.
-    fn update_output<A>(
+    fn update_output<A: 'static>(
         transition: &Transition<A, Self>,
         marking: &mut Marking<Self>,
         state: Self::State,
@@ -38,7 +41,10 @@ impl Color for usize {
     type Weight = UsizeWeight;
     type Id = String;
 
-    fn is_transition_enabled<A>(transition: &Transition<A, Self>, marking: &Marking<Self>) -> bool {
+    fn is_transition_enabled<A: 'static>(
+        transition: &Transition<A, Self>,
+        marking: &Marking<Self>,
+    ) -> bool {
         for arc in &transition.input {
             if marking[arc.target] < arc.weights.0.get() {
                 return false;
@@ -47,7 +53,7 @@ impl Color for usize {
         true
     }
 
-    fn update_input<A>(
+    fn update_input<A: 'static>(
         transition: &Transition<A, Self>,
         marking: &mut Marking<Self>,
     ) -> Option<Self::State> {
@@ -63,7 +69,7 @@ impl Color for usize {
         Some(())
     }
 
-    fn update_output<A>(
+    fn update_output<A: 'static>(
         transition: &Transition<A, Self>,
         marking: &mut Marking<Self>,
         _state: Self::State,

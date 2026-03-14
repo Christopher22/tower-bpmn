@@ -20,7 +20,9 @@ impl<A, C: Color> Update<A, C> {
         tasks: &mut Tasks<E, A, C>,
         petri_net: &PetriNet<A, C>,
         marking: &mut petri_net::Marking<C>,
-    ) {
+    ) where
+        A: 'static,
+    {
         // Remove the completed task
         tasks.remove(&self.task_id).await;
         C::update_output(&petri_net[self.transition_id], marking, self.new_state);
@@ -31,6 +33,10 @@ pub struct Tasks<E: Executor<()>, A, C: Color> {
     tasks: HashMap<TaskId, E::TaskHandle>,
     sender: futures::channel::mpsc::UnboundedSender<Update<A, C>>,
     executor: E,
+    /// Monotonically increasing counter used to generate unique task IDs.
+    /// Using `tasks.len()` would produce collisions when tasks complete and
+    /// new ones are spawned with the same count still in the map.
+    next_id: usize,
 }
 
 impl<E: Executor<()>, A, C: Color> Tasks<E, A, C> {
@@ -39,6 +45,7 @@ impl<E: Executor<()>, A, C: Color> Tasks<E, A, C> {
             tasks: HashMap::new(),
             sender,
             executor,
+            next_id: 0,
         }
     }
 
@@ -55,7 +62,8 @@ impl<E: Executor<()>, A, C: Color> Tasks<E, A, C> {
 
 impl<E: Executor<()>, A: Callable<C::State>, C: Color> Tasks<E, A, C> {
     pub fn spawn(&mut self, transition: Entry<'_, Transition<A, C>>, state: C::State) {
-        let task_id = TaskId(self.tasks.len());
+        let task_id = TaskId(self.next_id);
+        self.next_id += 1;
         let sender = self.sender.clone();
         let callback = transition.item.action.create_future(state);
         let transition_id = transition.id;

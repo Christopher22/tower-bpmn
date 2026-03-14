@@ -148,10 +148,14 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> JsonSchema for Instance
 /// The "raw" handle of a process instance.
 pub struct Handle<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
     executor: E,
-    /// The mutex is only required to guarantee the Handle is Sync.
-    task:
-        std::sync::Mutex<<E as Executor<crate::petri_net::Marking<State<B::Storage>>>>::TaskHandle>,
-    end: Id<Place<State<B::Storage>>>,
+    /// Keep the background simulation task alive. The Mutex is only needed to
+    /// make Handle`Sync`; we never actually lock it concurrently.
+    task: std::sync::Mutex<<E as Executor<()>>::TaskHandle>,
+    /// Shared future that resolves once the simulation delivers the final token.
+    /// Using `Shared` makes `wait_for_completion` cancellation-safe: if a caller
+    /// drops the future before it resolves the underlying computation keeps running
+    /// and the next caller can obtain the cached result.
+    result: futures::future::Shared<futures::channel::oneshot::Receiver<Token<B::Storage>>>,
 }
 
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Handle<E, B> {
@@ -160,11 +164,26 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Handle<E, B> {
         simulation: Simulation<E, FirstCompetingStrategy, Step<B::Storage>, State<B::Storage>>,
         end: Id<Place<State<B::Storage>>>,
     ) -> Self {
-        let task = executor.spawn_task(simulation.run());
+        use futures::FutureExt;
+        let (tx, rx) = futures::channel::oneshot::channel::<Token<B::Storage>>();
+        let result = rx.shared();
+        // Spawn a single background task that runs the simulation and, once it
+        // reaches the end place, forwards the final token through the oneshot channel.
+        let task = executor.spawn_task(async move {
+            let mut marking = simulation.run().await;
+            match std::mem::take(&mut marking[end]) {
+                State::Completed(token) => {
+                    let _ = tx.send(token);
+                }
+                _ => {
+                    // tx is dropped here, which resolves the receiver with Canceled
+                }
+            }
+        });
         Self {
             executor,
             task: std::sync::Mutex::new(task),
-            end,
+            result,
         }
     }
 }
@@ -208,32 +227,33 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> JsonSchema for Instance
 
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> InstanceStatus<E, B> {
     async fn wait_for_completion(&mut self) -> Result<Token<B::Storage>, InstanceNotRunning> {
-        match std::mem::replace(self, InstanceStatus::Stopped) {
-            InstanceStatus::Running(handle) => {
-                let mut marking: crate::petri_net::Marking<State<B::Storage>> =
-                    <E as Executor<crate::petri_net::Marking<State<B::Storage>>>>::join(
-                        &handle.executor,
-                        handle.task.into_inner().unwrap(),
-                    )
-                    .await
-                    .expect("process simulation failed to complete");
-                match std::mem::take(&mut marking[handle.end]) {
-                    State::Completed(token) => Ok(token),
-                    _ => panic!("process completed without token at the end place"),
-                }
+        // Clone the shared future *before* any await point so that if this future
+        // is cancelled (e.g. by tokio::time::timeout) `self` is left unchanged as
+        // `Running`.  The shared future caches its result so new callers can always
+        // retrieve the token once the simulation completes.
+        let shared = match self {
+            InstanceStatus::Running(handle) => handle.result.clone(),
+            _ => return Err(InstanceNotRunning),
+        };
+        // --- cancellation point ---
+        match shared.await {
+            Ok(token) => {
+                *self = InstanceStatus::Completed;
+                Ok(token)
             }
-            _ => Err(InstanceNotRunning),
+            Err(_) => {
+                // The simulation task was aborted (stop() was called) or panicked.
+                *self = InstanceStatus::Stopped;
+                Err(InstanceNotRunning)
+            }
         }
     }
 
     async fn stop(&mut self) -> Result<(), InstanceNotRunning> {
         match std::mem::replace(self, InstanceStatus::Stopped) {
             InstanceStatus::Running(handle) => {
-                <E as Executor<crate::petri_net::Marking<State<B::Storage>>>>::stop(
-                    &handle.executor,
-                    handle.task.into_inner().unwrap(),
-                )
-                .await;
+                <E as Executor<()>>::stop(&handle.executor, handle.task.into_inner().unwrap())
+                    .await;
                 Ok(())
             }
             _ => Err(InstanceNotRunning),

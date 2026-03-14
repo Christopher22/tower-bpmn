@@ -64,9 +64,9 @@ impl<S: Storage, const NUM: usize, V: Value> JoinableGateway<NUM, V, S> for Xor<
         let petri_net = petri_net.deref_mut();
         let output = petri_net.add_place(Place::new("XOR Join Output", super::State::Inactive));
 
-        for (index, place) in current_places.into_iter().enumerate() {
+        for (_, place) in current_places.into_iter().enumerate() {
             let transition = petri_net.add_transition(super::Step::Task(
-                format!("XOR Join {index}"),
+                "XOR Join".to_string(),
                 Box::new(|name: &str, state: Vec<super::Token<S>>| {
                     state
                         .into_iter()
@@ -96,24 +96,17 @@ impl<S: Storage, V: Value, C: Fn(&super::Token<S>, V) -> usize + Clone + Sync + 
                 format!("XOR Output {i}"),
                 super::State::Inactive,
             ));
-            let transition = petri_net.add_transition(super::Step::Task(
+            // Use XorBranch so that only the selected branch transition is enabled
+            // according to the BPMN XOR-split standard: exactly one outgoing path fires.
+            let transition = petri_net.add_transition(super::Step::XorBranch(
                 format!("XOR Transition {i}"),
                 Box::new({
                     let callback = self.0.clone();
-                    move |_name: &str, state: Vec<super::Token<S>>| {
-                        assert!(
-                            state.len() == 1,
-                            "Exactly one token should be consumed by a task"
-                        );
-                        let token = state.into_iter().next().unwrap();
+                    move |token: &super::Token<S>| {
                         let value = token
                             .get_last::<V>()
                             .expect("the input value should be present in the token history");
-                        if callback(&token, value) == i {
-                            vec![token.set_output(format!("XOR Transition {i}"), ())]
-                        } else {
-                            vec![]
-                        }
+                        callback(token, value) == i
                     }
                 }),
             ));

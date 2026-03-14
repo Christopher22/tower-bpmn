@@ -64,7 +64,7 @@ impl<S: Storage> crate::petri_net::Color for State<S> {
     type Weight = ();
     type Id = String;
 
-    fn is_transition_enabled<A>(
+    fn is_transition_enabled<A: 'static>(
         transition: &crate::petri_net::Transition<A, Self>,
         marking: &crate::petri_net::Marking<Self>,
     ) -> bool {
@@ -74,10 +74,24 @@ impl<S: Storage> crate::petri_net::Color for State<S> {
                 _ => return false,
             }
         }
+        // For XOR gateway branches, additionally check the guard condition using
+        // runtime type introspection. This ensures only the selected branch is enabled.
+        use std::any::Any;
+        let action_any: &dyn Any = &transition.action;
+        if let Some(step) = action_any.downcast_ref::<Step<S>>() {
+            if let Step::XorBranch(_, guard) = step {
+                if let Some(arc) = transition.input.first() {
+                    if let State::Completed(ref token) = marking[arc.target] {
+                        return guard(token);
+                    }
+                }
+                return false;
+            }
+        }
         true
     }
 
-    fn update_input<A>(
+    fn update_input<A: 'static>(
         transition: &crate::petri_net::Transition<A, Self>,
         marking: &mut crate::petri_net::Marking<Self>,
     ) -> Option<Self::State> {
@@ -100,7 +114,7 @@ impl<S: Storage> crate::petri_net::Color for State<S> {
         Some(tokens)
     }
 
-    fn update_output<A>(
+    fn update_output<A: 'static>(
         transition: &crate::petri_net::Transition<A, Self>,
         marking: &mut crate::petri_net::Marking<Self>,
         state: Self::State,
@@ -123,6 +137,11 @@ pub(crate) enum Step<S: Storage> {
     And(usize),
     Task(String, StepTaskFn<S>),
     Waitable(String, StepWaitFn<S>),
+    /// An exclusive-gateway branch. The guard closure returns `true` when this
+    /// particular branch is the one selected by the XOR condition at run-time.
+    /// `is_transition_enabled` uses it so the branch is invisible to the simulation
+    /// unless it is the correct one, giving proper BPMN XOR-split semantics.
+    XorBranch(String, Box<dyn Fn(&Token<S>) -> bool + Send + Sync>),
 }
 
 impl<S: Storage> std::fmt::Debug for Step<S> {
@@ -131,6 +150,7 @@ impl<S: Storage> std::fmt::Debug for Step<S> {
             Self::And(arg0) => f.debug_tuple("And").field(arg0).finish(),
             Self::Task(_, _) => f.debug_tuple("Task").finish_non_exhaustive(),
             Self::Waitable(_, _) => f.debug_tuple("Waitable").finish_non_exhaustive(),
+            Self::XorBranch(_, _) => f.debug_tuple("XorBranch").finish_non_exhaustive(),
         }
     }
 }
@@ -161,6 +181,17 @@ impl<S: Storage> crate::petri_net::Callable<Vec<Token<S>>> for Step<S> {
                 Box::pin(futures::future::ready(result))
             }
             Step::Waitable(name, future) => future(name, state),
+            Step::XorBranch(name, _guard) => {
+                // Guard already checked by is_transition_enabled; this branch is the
+                // selected one. Pass the token through, recording the step name.
+                let name = name.clone();
+                Box::pin(futures::future::ready(
+                    state
+                        .into_iter()
+                        .map(|token| token.set_output(&name, ()))
+                        .collect(),
+                ))
+            }
         }
     }
 }

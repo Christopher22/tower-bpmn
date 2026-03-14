@@ -215,7 +215,7 @@ pub enum EnabledTransitions<'a, A, C: Color> {
     Competing(Vec<Entry<'a, Transition<A, C>>>),
 }
 
-impl<A, C: Color> EnabledTransitions<'_, A, C> {
+impl<A: 'static, C: Color> EnabledTransitions<'_, A, C> {
     pub fn find_all<'a>(
         petri_net: &'a PetriNet<A, C>,
         marking: &Marking<C>,
