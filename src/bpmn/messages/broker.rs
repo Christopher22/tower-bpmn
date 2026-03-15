@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use crate::{Process, ProcessName, Value};
 
-use super::{CorrelationKey, Message, Messages};
+use super::{Context, CorrelationKey, Message, Messages};
 
-type Callback = dyn Fn(&MessageBroker, CorrelationKey, serde_json::Value) -> Result<(), MessageError>
+type Callback = dyn Fn(&MessageBroker, CorrelationKey, serde_json::Value, Context) -> Result<(), MessageError>
     + Send
     + Sync;
 struct InnerRouter {
@@ -17,13 +17,14 @@ impl InnerRouter {
     fn new<P: Process>(process: P) -> Self {
         InnerRouter {
             messages: Messages::new(),
-            dynamic_send: Box::new(move |broker, correlation_key, payload| {
+            dynamic_send: Box::new(move |broker, correlation_key, payload, context| {
                 let value: P::Input =
                     serde_json::from_value(payload).map_err(|_| MessageError::InvalidType)?;
                 broker.send_message(Message {
                     process: process.clone(),
                     payload: value,
                     correlation_key,
+                    context,
                 })
             }),
         }
@@ -55,9 +56,7 @@ impl MessageBroker {
     ) -> Result<(), MessageError> {
         match self.0.get(&ProcessName::from(message.process.metadata())) {
             Some(messages) => {
-                messages
-                    .messages
-                    .send(message.correlation_key, message.payload);
+                messages.messages.send(message.metadata(), message.payload);
                 Ok(())
             }
             None => Err(MessageError::NoTarget),
@@ -71,9 +70,12 @@ impl MessageBroker {
         process_name: ProcessName,
         correlation_key: CorrelationKey,
         payload: serde_json::Value,
+        context: Context,
     ) -> Result<(), MessageError> {
         match self.0.get(&process_name) {
-            Some(messages) => messages.dynamic_send.as_ref()(self, correlation_key, payload),
+            Some(messages) => {
+                messages.dynamic_send.as_ref()(self, correlation_key, payload, context)
+            }
             None => Err(MessageError::NoTarget),
         }
     }

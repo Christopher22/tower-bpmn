@@ -11,7 +11,7 @@ use http_body::Body;
 use parking_lot::RwLock;
 use tower_service::Service;
 
-use crate::{ExtendedExecutor, ProcessName, Runtime, StorageBackend};
+use crate::{ExtendedExecutor, ProcessName, Runtime, StorageBackend, messages};
 
 use super::{
     error::ApiError,
@@ -114,6 +114,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Api<E, B> {
                     process_name.parse::<ProcessName>()?,
                     request.correlation_key,
                     request.payload,
+                    messages::Context::default(),
                 )?;
 
                 Ok(json_response(

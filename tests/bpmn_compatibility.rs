@@ -1,6 +1,6 @@
 use axum_bpmn::{
     InMemory, IncomingMessage, Process, ProcessBuilder, Runtime, Step, Storage, Token,
-    messages::{CorrelationKey, Message},
+    messages::{Context, CorrelationKey, Message},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,10 +46,10 @@ impl Process for WaitForMessageProcess {
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
         process
-            .wait_for(
+            .wait_for(IncomingMessage::<MessageTarget, i32>::new(
                 MessageTarget,
-                IncomingMessage::<MessageTarget, i32>::new(MessageTarget, "message-catch-event"),
-            )
+                "message-catch-event",
+            ))
             .then("post-process", |_token, value| value * 3)
     }
 }
@@ -81,6 +81,7 @@ impl Process for ThrowMessageProcess {
                     process: MessageTarget,
                     payload,
                     correlation_key,
+                    context: Context::default(),
                 },
             )
             .then("complete", |_token, (_key, payload)| payload)
@@ -173,6 +174,7 @@ async fn correlation_keys_isolate_parallel_message_instances() {
             process: MessageTarget,
             payload: 7,
             correlation_key: key_b,
+            context: Context::default(),
         })
         .expect("message for key_b must be accepted");
     runtime
@@ -181,6 +183,7 @@ async fn correlation_keys_isolate_parallel_message_instances() {
             process: MessageTarget,
             payload: 5,
             correlation_key: key_a,
+            context: Context::default(),
         })
         .expect("message for key_a must be accepted");
 

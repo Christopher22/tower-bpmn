@@ -64,10 +64,7 @@ impl Process for WaitProcess {
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
         process
-            .wait_for(
-                MessageTarget,
-                IncomingMessage::new(MessageTarget, "incoming"),
-            )
+            .wait_for(IncomingMessage::new(MessageTarget, "incoming"))
             .then("double", |_token, value: i32| value * 2)
     }
 }

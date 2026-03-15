@@ -22,7 +22,7 @@ pub use self::runtime::{
     ResumableProcess, ResumeError, Runtime, Storage, StorageBackend, Token, TokenId, Value,
 };
 pub use self::steps::{InvalidStep, Step, Steps, StepsBuilder, UnfinishedBuilder};
-pub use self::waitable::{IncomingMessage, Timer, Waitable};
+pub use self::waitable::{Bindable, IncomingMessage, Timer, Waitable};
 
 /// Executor abstraction required by the BPMN runtime.
 pub trait ExtendedExecutor<S: Storage>:
@@ -317,7 +317,7 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
                 name,
                 Self::wrap_function::<false, _>(move |token, value| {
                     let message = func(token, value);
-                    sender.send(message.correlation_key, message.payload);
+                    sender.send(message.metadata(), message.payload);
                 }),
             )),
             process: self.process,
@@ -352,12 +352,11 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
     /// Adds a wait state that resumes once the given waitable completes.
     pub fn wait_for<P2: Process, O: Value, W: Waitable<P2, E, O> + Send + Sync + 'static>(
         mut self,
-        process: P2,
         mut waitable: W,
     ) -> ProcessBuilder<P, O, S> {
         let name = self.steps.add(waitable.name()).expect("failed to add step");
 
-        waitable.bind_messages(self.message_manager.get_messages_for_process::<P2>(process));
+        waitable.bind_messages(&self.message_manager);
         let waitable = Arc::new(waitable);
         let generator = Box::new(move |name: Step, state: Vec<Token<S>>| {
             let waitable = waitable.clone();

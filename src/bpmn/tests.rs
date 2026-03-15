@@ -111,6 +111,7 @@ impl Process for ThrowingProcess {
                     process: MessageTargetProcess,
                     payload,
                     correlation_key: key,
+                    context: Context::default(),
                 }
             })
             .then("done", |_token, (_key, payload)| payload)
@@ -137,10 +138,7 @@ impl Process for WaitingProcess {
         builder: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
         builder
-            .wait_for(
-                MessageTargetProcess,
-                IncomingMessage::new(MessageTargetProcess, "incoming"),
-            )
+            .wait_for(IncomingMessage::new(MessageTargetProcess, "incoming"))
             .then("double", |_token, value: i32| value * 2)
     }
 }
@@ -159,6 +157,7 @@ fn message_manager_returns_no_target_when_process_not_registered() {
         process: MessageTargetProcess,
         payload: 10,
         correlation_key: CorrelationKey::new(),
+        context: Context::default(),
     });
     assert_eq!(result, Err(MessageError::NoTarget));
 }
@@ -203,11 +202,12 @@ fn xor_process_definition_registers_successfully() {
 #[tokio::test(flavor = "current_thread")]
 async fn incoming_message_waitable_returns_payload() {
     let mut waitable = IncomingMessage::<DummyProcess, i32>::new(DummyProcess, "incoming");
-    let messages = Messages::new();
-    waitable.bind_messages(messages.clone());
+    let messages = MessageBroker::new();
+    waitable.bind_messages(&messages);
 
-    let key = CorrelationKey::new();
-    messages.send(key, 77_i32);
+    let message = Message::new(DummyProcess, 77_i32);
+    let key = message.correlation_key;
+    messages.send_message(message).unwrap();
 
     let value = waitable
         .wait_for(&Token::new(InMemoryStorage::for_test()), key)
@@ -218,15 +218,18 @@ async fn incoming_message_waitable_returns_payload() {
 #[tokio::test(flavor = "current_thread")]
 async fn incoming_message_waitable_ignores_other_correlation_keys() {
     let mut waitable = IncomingMessage::<DummyProcess, i32>::new(DummyProcess, "incoming");
-    let messages = Messages::new();
-    waitable.bind_messages(messages.clone());
+    let messages = MessageBroker::new();
+    waitable.bind_messages(&messages);
 
-    let expected_key = CorrelationKey::new();
-    let other_key = CorrelationKey::new();
+    let expected_message = Message::new(DummyProcess, 88_i32);
+    let other_message = Message::new(DummyProcess, 11_i32);
 
-    let wait_future = waitable.wait_for(&Token::new(InMemoryStorage::for_test()), expected_key);
-    messages.send(other_key, 11_i32);
-    messages.send(expected_key, 88_i32);
+    let wait_future = waitable.wait_for(
+        &Token::new(InMemoryStorage::for_test()),
+        expected_message.correlation_key,
+    );
+    messages.send_message(other_message).unwrap();
+    messages.send_message(expected_message).unwrap();
 
     let value = timeout(TokioDuration::from_secs(1), wait_future)
         .await
