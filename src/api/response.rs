@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::{
-    CorrelationKey, ExtendedExecutor, Instance, InstanceId, Instances, MetaData, ProcessName,
-    Runtime, StorageBackend,
+    ExtendedExecutor, Instance, InstanceId, Instances, MetaData, ProcessName, Runtime,
+    StorageBackend, messages::CorrelationKey,
 };
 
 use super::error::ApiError;

@@ -4,9 +4,8 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 
 use crate::{
-    BpmnStep, CorrelationKey, ExtendedExecutor, InstanceId, InstanceSpawnError, Message, MetaData,
-    Process, ProcessBuilder, ProcessError, ProcessName, Runtime, SendError, State, Steps,
-    StorageBackend, Token, Value,
+    BpmnStep, ExtendedExecutor, InstanceId, InstanceSpawnError, MetaData, Process, ProcessBuilder,
+    ProcessError, ProcessName, Runtime, State, Steps, StorageBackend, Token, Value,
     petri_net::{FirstCompetingStrategy, Id, PetriNet, Place, Simulation},
 };
 
@@ -102,18 +101,8 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RegisteredProcess<E, B>
         &self,
         runtime: &Runtime<E, B>,
         input: JsonValue,
-    ) -> Result<InstanceId, RuntimeApiError> {
-        (self.dynamic_api.start)(runtime, input)
-    }
-
-    /// Send a dynamic message.
-    pub(crate) fn send_message_dynamic(
-        &self,
-        runtime: &Runtime<E, B>,
-        correlation_key: CorrelationKey,
-        payload: JsonValue,
-    ) -> Result<(), RuntimeApiError> {
-        (self.dynamic_api.send_message)(runtime, correlation_key, payload)
+    ) -> Result<InstanceId, InstanceSpawnError> {
+        (self.dynamic_api.0)(runtime, input)
     }
 }
 
@@ -159,45 +148,19 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> std::fmt::Display
 }
 
 type ApiStart<E, B> =
-    Arc<dyn Fn(&Runtime<E, B>, JsonValue) -> Result<InstanceId, RuntimeApiError> + Send + Sync>;
-type ApiSendMessage<E, B> = Arc<
-    dyn Fn(&Runtime<E, B>, CorrelationKey, JsonValue) -> Result<(), RuntimeApiError> + Send + Sync,
->;
+    Box<dyn Fn(&Runtime<E, B>, JsonValue) -> Result<InstanceId, InstanceSpawnError> + Send + Sync>;
 
-pub(super) struct DynamicCaller<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
-    start: ApiStart<E, B>,
-    send_message: ApiSendMessage<E, B>,
-}
+pub(super) struct DynamicCaller<E: ExtendedExecutor<B::Storage>, B: StorageBackend>(ApiStart<E, B>);
 
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> DynamicCaller<E, B> {
-    pub fn new<P: Process + Clone + Send + Sync>(
-        process_for_start: P,
-        process_for_message: P,
-    ) -> Self {
-        Self {
-            start: Arc::new(move |runtime: &Runtime<E, B>, input: JsonValue| {
+    pub fn new<P: Process + Clone + Send + Sync>(process_for_start: P) -> Self {
+        Self(Box::new(
+            move |runtime: &Runtime<E, B>, input: JsonValue| {
                 let value: P::Input = serde_json::from_value(input)
-                    .map_err(|err| RuntimeApiError::InvalidPayload(err.to_string()))?;
-                runtime
-                    .run(process_for_start.clone(), value)
-                    .map_err(RuntimeApiError::Instance)
-            }),
-            send_message: Arc::new(
-                move |runtime: &Runtime<E, B>,
-                      correlation_key: CorrelationKey,
-                      payload: JsonValue| {
-                    let value: P::Input = serde_json::from_value(payload)
-                        .map_err(|err| RuntimeApiError::InvalidPayload(err.to_string()))?;
-                    runtime
-                        .send_message(Message {
-                            process: process_for_message.clone(),
-                            payload: value,
-                            correlation_key,
-                        })
-                        .map_err(RuntimeApiError::Send)
-                },
-            ),
-        }
+                    .map_err(|err| InstanceSpawnError::InvalidInput(err.to_string()))?;
+                runtime.run(process_for_start.clone(), value)
+            },
+        ))
     }
 }
 
@@ -205,17 +168,4 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> std::fmt::Debug for Dyn
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DynamicCaller").finish_non_exhaustive()
     }
-}
-
-/// Errors emitted by runtime API adapters.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeApiError {
-    /// Process is unknown.
-    Unregistered,
-    /// JSON payload could not be deserialized.
-    InvalidPayload(String),
-    /// Instance startup failed.
-    Instance(InstanceSpawnError),
-    /// Message dispatch failed.
-    Send(SendError),
 }

@@ -1,3 +1,5 @@
+//! Gateway primitives for splitting and joining BPMN control flow.
+
 use std::{borrow::Cow, ops::DerefMut};
 
 use crate::{

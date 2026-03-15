@@ -7,13 +7,11 @@ mod token;
 use serde_json::Value as JsonValue;
 use std::{any::TypeId, collections::HashMap};
 
-use crate::{
-    ExtendedExecutor, Message, MessageManager, Process, ProcessBuilder, ProcessName, SendError,
-};
+use crate::{ExtendedExecutor, Process, ProcessBuilder, ProcessName, messages::MessageBroker};
 
 pub use instance::{Handle, Instance, InstanceId, InstanceNotRunning, InstanceStatus};
 pub use instances::{InstanceSpawnError, Instances};
-pub use registered_process::{RegisteredProcess, RuntimeApiError};
+pub use registered_process::RegisteredProcess;
 pub use storage::{
     InMemory, InMemoryStorage, ResumableProcess, ResumeError, Storage, StorageBackend,
 };
@@ -21,8 +19,9 @@ pub use token::{Token, TokenId, Value};
 
 /// Runtime that stores process definitions and starts process instances.
 pub struct Runtime<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
+    /// Message broker for inter-process communication.
+    pub messages: MessageBroker,
     registered_processes: HashMap<ProcessName, Instances<E, B>>,
-    message_manager: MessageManager,
     executor: E,
     storage_backend: B,
 }
@@ -32,7 +31,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
     pub fn new(executor: E, storage_backend: B) -> Self {
         Runtime {
             registered_processes: HashMap::new(),
-            message_manager: MessageManager::new(),
+            messages: MessageBroker::new(),
             executor,
             storage_backend,
         }
@@ -47,12 +46,10 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
         let process_name = ProcessName::from(&metadata);
         // Prepare dynamic dispatch
         let process_for_start = process.clone();
-        let process_for_message = process.clone();
-        let dynamic_api =
-            registered_process::DynamicCaller::new(process_for_start, process_for_message);
+        let dynamic_api = registered_process::DynamicCaller::new(process_for_start);
 
         let raw_process = {
-            let builder = ProcessBuilder::new(metadata, self.message_manager.clone());
+            let builder = ProcessBuilder::new(metadata, self.messages.clone());
             RegisteredProcess::try_from((process.define(builder), dynamic_api))?
         };
 
@@ -101,34 +98,17 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
     /// Starts a registered process by its name using JSON input.
     pub fn run_dynamic(
         &self,
-        process_name: ProcessName,
+        process_name: &ProcessName,
         input: JsonValue,
-    ) -> Result<InstanceId, RuntimeApiError> {
+    ) -> Result<InstanceId, InstanceSpawnError> {
         let process = self
             .registered_processes
-            .get(&process_name)
-            .ok_or(RuntimeApiError::Unregistered)?;
+            .get(process_name)
+            .ok_or(InstanceSpawnError::Unregistered)?;
         process.registered_process.run_dynamic(self, input)
     }
 
-    /// Sends a message to a registered process by name using JSON payload.
-    pub fn send_message_dynamic(
-        &self,
-        process_name: ProcessName,
-        correlation_key: super::CorrelationKey,
-        payload: JsonValue,
-    ) -> Result<(), RuntimeApiError> {
-        let process = self
-            .registered_processes
-            .get(&process_name)
-            .ok_or(RuntimeApiError::Unregistered)?;
-        process
-            .registered_process
-            .send_message_dynamic(self, correlation_key, payload)
-    }
-
     /// Run a process with the given input. The process will be executed in the background, and an instance handle will be returned for waiting for completion or resuming later.
-    /// Actually, this is just a shorthand for sending a message to the process with the input as payload and without message correlation.
     pub fn run<P: Process>(
         &self,
         process: P,
@@ -146,16 +126,6 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
             Some(_) => Err(InstanceSpawnError::InvalidContext),
             None => Err(InstanceSpawnError::Unregistered),
         }
-    }
-
-    /// Send a message to a process as defined in BPMN.
-    /// If there is a process waiting for the message, the message will be delivered to the process and the process will be resumed if it is waiting.
-    /// If the type and name matches the start event of a process, a new instance of the process will be started with the message payload as input.
-    pub fn send_message<P: Process, V: Value>(
-        &self,
-        message: Message<P, V>,
-    ) -> Result<(), SendError> {
-        self.message_manager.send_message(message)
     }
 }
 

@@ -1,6 +1,6 @@
 use axum_bpmn::{
-    CorrelationKey, InMemory, IncomingMessage, Message, Process, ProcessBuilder, Runtime, Step,
-    Storage, Token,
+    InMemory, IncomingMessage, Process, ProcessBuilder, Runtime, Step, Storage, Token,
+    messages::{CorrelationKey, Message},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,10 +46,10 @@ impl Process for WaitForMessageProcess {
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
         process
-            .wait_for(IncomingMessage::<MessageTarget, i32>::new(
+            .wait_for(
                 MessageTarget,
-                "message-catch-event",
-            ))
+                IncomingMessage::<MessageTarget, i32>::new(MessageTarget, "message-catch-event"),
+            )
             .then("post-process", |_token, value| value * 3)
     }
 }
@@ -76,6 +76,7 @@ impl Process for ThrowMessageProcess {
         process
             .throw_message(
                 "message-throw-event",
+                MessageTarget,
                 |_token: &Token<S>, (correlation_key, payload): (CorrelationKey, i32)| Message {
                     process: MessageTarget,
                     payload,
@@ -167,6 +168,7 @@ async fn correlation_keys_isolate_parallel_message_instances() {
         .expect("second waiter instance must start");
 
     runtime
+        .messages
         .send_message(Message {
             process: MessageTarget,
             payload: 7,
@@ -174,6 +176,7 @@ async fn correlation_keys_isolate_parallel_message_instances() {
         })
         .expect("message for key_b must be accepted");
     runtime
+        .messages
         .send_message(Message {
             process: MessageTarget,
             payload: 5,

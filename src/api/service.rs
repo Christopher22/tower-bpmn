@@ -93,7 +93,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Api<E, B> {
                 Ok(json_response(
                     StatusCode::ACCEPTED,
                     &StartInstanceResponse {
-                        instance_id: runtime.read().run_dynamic(process_name, request.input)?,
+                        instance_id: runtime.read().run_dynamic(&process_name, request.input)?,
                     },
                 ))
             }
@@ -110,7 +110,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Api<E, B> {
             ("POST", ["processes", process_name, "messages"]) => {
                 let request: SendMessageRequest =
                     parse_json_body(body).await.and_then(decode_json_payload)?;
-                runtime.read().send_message_dynamic(
+                runtime.read().messages.send_message_dynamic(
                     process_name.parse::<ProcessName>()?,
                     request.correlation_key,
                     request.payload,

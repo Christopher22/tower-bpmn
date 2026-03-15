@@ -3,8 +3,8 @@ use http_body_util::{Empty, Full};
 use tower_service::Service;
 
 use crate::{
-    Api, CorrelationKey, InMemory, IncomingMessage, MetaData, Process, ProcessBuilder, Runtime,
-    Storage, Token, executor::TokioExecutor,
+    Api, InMemory, IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Storage, Token,
+    executor::TokioExecutor, messages::CorrelationKey,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,11 +64,11 @@ impl Process for WaitProcess {
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
         process
-            .wait_for(IncomingMessage::<MessageTarget, i32>::new(
+            .wait_for(
                 MessageTarget,
-                "incoming",
-            ))
-            .then("double", |_token, value| value * 2)
+                IncomingMessage::new(MessageTarget, "incoming"),
+            )
+            .then("double", |_token, value: i32| value * 2)
     }
 }
 
@@ -463,7 +463,7 @@ async fn rejects_invalid_start_instance_payload_shape() {
     assert!(
         body["error"]
             .as_str()
-            .is_some_and(|msg| msg.contains("invalid request payload"))
+            .is_some_and(|msg| msg.contains("invalid input"))
     );
 }
 
@@ -477,7 +477,7 @@ async fn returns_not_found_for_unknown_process_instances_route() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn returns_not_found_for_unknown_process_messages_route() {
+async fn returns_conflict_for_unknown_process_messages_route() {
     let mut api = build_api();
     let (status, body) = call_json(
         &mut api,
@@ -491,8 +491,8 @@ async fn returns_not_found_for_unknown_process_messages_route() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"], "unknown process");
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "no waiting instance for this message");
 }
 
 #[tokio::test(flavor = "current_thread")]

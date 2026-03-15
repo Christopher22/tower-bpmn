@@ -126,7 +126,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> schemars::JsonSchema fo
 }
 
 /// Errors while creating or resolving an instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum InstanceSpawnError {
     /// Not registered
     Unregistered,
@@ -134,4 +134,6 @@ pub enum InstanceSpawnError {
     Completed,
     /// The context does not match the process instance.
     InvalidContext,
+    /// The input value is invalid for the process instance. This could only be emitted by the dynamic API, because the static API checks the input type at compile time.
+    InvalidInput(String),
 }

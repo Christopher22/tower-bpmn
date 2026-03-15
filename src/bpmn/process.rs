@@ -5,7 +5,7 @@ use crate::Storage;
 use super::{ProcessBuilder, Value};
 
 /// A BPMN process definition.
-pub trait Process: 'static + Sized {
+pub trait Process: 'static + Clone + Sized + Send + Sync {
     /// Input payload type for starting a process instance.
     type Input: Value;
     /// Final output payload type of the process.

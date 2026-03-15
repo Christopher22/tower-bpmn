@@ -1,6 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use tokio::time::{Duration as TokioDuration, timeout};
 
+use super::messages::*;
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,10 +106,12 @@ impl Process for ThrowingProcess {
         builder: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
         builder
-            .throw_message("throw", |_token, (key, payload)| Message {
-                process: MessageTargetProcess,
-                payload,
-                correlation_key: key,
+            .throw_message("throw", MessageTargetProcess, |_token, (key, payload)| {
+                Message {
+                    process: MessageTargetProcess,
+                    payload,
+                    correlation_key: key,
+                }
             })
             .then("done", |_token, (_key, payload)| payload)
     }
@@ -134,11 +137,11 @@ impl Process for WaitingProcess {
         builder: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
         builder
-            .wait_for(IncomingMessage::<MessageTargetProcess, i32>::new(
+            .wait_for(
                 MessageTargetProcess,
-                "incoming",
-            ))
-            .then("double", |_token, value| value * 2)
+                IncomingMessage::new(MessageTargetProcess, "incoming"),
+            )
+            .then("double", |_token, value: i32| value * 2)
     }
 }
 
@@ -151,13 +154,13 @@ fn runtime_returns_unregistered_error_for_unknown_process() {
 
 #[test]
 fn message_manager_returns_no_target_when_process_not_registered() {
-    let manager = MessageManager::new();
+    let manager = MessageBroker::new();
     let result = manager.send_message(Message {
         process: MessageTargetProcess,
         payload: 10,
         correlation_key: CorrelationKey::new(),
     });
-    assert_eq!(result, Err(SendError::NoTarget));
+    assert_eq!(result, Err(MessageError::NoTarget));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -200,7 +203,7 @@ fn xor_process_definition_registers_successfully() {
 #[tokio::test(flavor = "current_thread")]
 async fn incoming_message_waitable_returns_payload() {
     let mut waitable = IncomingMessage::<DummyProcess, i32>::new(DummyProcess, "incoming");
-    let messages = ProcessMessages::new();
+    let messages = Messages::new();
     waitable.bind_messages(messages.clone());
 
     let key = CorrelationKey::new();
@@ -215,7 +218,7 @@ async fn incoming_message_waitable_returns_payload() {
 #[tokio::test(flavor = "current_thread")]
 async fn incoming_message_waitable_ignores_other_correlation_keys() {
     let mut waitable = IncomingMessage::<DummyProcess, i32>::new(DummyProcess, "incoming");
-    let messages = ProcessMessages::new();
+    let messages = Messages::new();
     waitable.bind_messages(messages.clone());
 
     let expected_key = CorrelationKey::new();
