@@ -4,7 +4,7 @@ use chrono::DateTime;
 
 use crate::{
     Process, Storage, Token, Value,
-    messages::{CorrelationKey, GuardedCorrelationKey, MessageBroker, Messages},
+    messages::{CorrelationKey, GuardedCorrelationKey, MessageBroker, MessageMetaData, Messages},
 };
 
 /// Allow binding message channels to waitables, which can be used to implement message-based waiting events.
@@ -106,8 +106,11 @@ impl<P: Process, E: Value> Waitable<P, CorrelationKey, E> for IncomingMessage<P,
         Box::pin(async move {
             loop {
                 match receiver.recv().await {
-                    Ok(metadata) if metadata.correlation_key == correlation_key => {
-                        if let Some(message) = messages.receive::<E>(metadata.correlation_key) {
+                    Ok(MessageMetaData {
+                        correlation_key: Some(metadata_correlation_key),
+                        context: _,
+                    }) if metadata_correlation_key == correlation_key => {
+                        if let Some(message) = messages.receive::<E>(correlation_key) {
                             return message;
                         }
                     }
@@ -147,17 +150,20 @@ impl<P: Process, E: Value> Waitable<P, GuardedCorrelationKey, E> for IncomingMes
         Box::pin(async move {
             loop {
                 match receiver.recv().await {
-                    Ok(metadata)
-                        if metadata.correlation_key == guarded_correlation_key.key
-                            && metadata
-                                .context
-                                .is_suitable_for(&guarded_correlation_key.expected_sender) =>
+                    Ok(MessageMetaData {
+                        correlation_key: Some(metadata_correlation_key),
+                        context,
+                    }) if metadata_correlation_key == guarded_correlation_key.key
+                        && context.is_suitable_for(&guarded_correlation_key.expected_sender) =>
                     {
-                        if let Some(message) = messages.receive::<E>(metadata.correlation_key) {
+                        if let Some(message) = messages.receive::<E>(metadata_correlation_key) {
                             return message;
                         }
                     }
-                    Ok(metadata) if metadata.correlation_key == guarded_correlation_key.key => {
+                    Ok(MessageMetaData {
+                        correlation_key: Some(metadata_correlation_key),
+                        context: _,
+                    }) if metadata_correlation_key == guarded_correlation_key.key => {
                         // Message with matching key but unsuitable sender, ignore.
                     }
                     Ok(_) => {

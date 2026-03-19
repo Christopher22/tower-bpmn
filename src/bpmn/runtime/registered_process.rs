@@ -63,7 +63,8 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RegisteredProcess<E, B>
         self.process_type == TypeId::of::<P>() && &self.meta_data == process.metadata()
     }
 
-    /// Create a new simulation for this process with the given input. The simulation will be initialized with the input token at the start place of the process.
+    /// Create a new simulation for this process with the given input.
+    /// The simulation will be initialized with the input token at the start place of the process.
     pub(crate) fn start<A: ExtendedExecutor<B::Storage>, V: Value>(
         &self,
         executor: A,

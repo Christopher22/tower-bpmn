@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::hash::Hash;
 use std::{borrow::Cow, sync::Arc};
 
 #[derive(
@@ -33,6 +34,16 @@ impl Participant {
 pub struct Context(Arc<HashSet<Participant>>);
 
 impl Context {
+    /// Creates a context matching the given participant, if it is not 'Nobody'.
+    pub fn new_matching(participant: Participant) -> Option<Self> {
+        match participant {
+            Participant::Nobody => None,
+            Participant::Everyone => Some(HashSet::new()),
+            participant => Some(HashSet::from([participant])),
+        }
+        .map(|value| Context(Arc::new(value)))
+    }
+
     /// Checks if the message context matches the expected participant.
     pub fn is_suitable_for(&self, participant: &Participant) -> bool {
         match participant {

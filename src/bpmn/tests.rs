@@ -110,7 +110,7 @@ impl Process for ThrowingProcess {
                 Message {
                     process: MessageTargetProcess,
                     payload,
-                    correlation_key: key,
+                    correlation_key: Some(key),
                     context: Context::default(),
                 }
             })
@@ -156,7 +156,7 @@ fn message_manager_returns_no_target_when_process_not_registered() {
     let result = manager.send_message(Message {
         process: MessageTargetProcess,
         payload: 10,
-        correlation_key: CorrelationKey::new(),
+        correlation_key: Some(CorrelationKey::new()),
         context: Context::default(),
     });
     assert_eq!(result, Err(MessageError::NoTarget));
@@ -206,7 +206,7 @@ async fn incoming_message_waitable_returns_payload() {
     waitable.bind_messages(&messages);
 
     let message = Message::new(DummyProcess, 77_i32);
-    let key = message.correlation_key;
+    let key = message.correlation_key.unwrap();
     messages.send_message(message).unwrap();
 
     let value = waitable
@@ -226,7 +226,7 @@ async fn incoming_message_waitable_ignores_other_correlation_keys() {
 
     let wait_future = waitable.wait_for(
         &Token::new(InMemoryStorage::for_test()),
-        expected_message.correlation_key,
+        expected_message.correlation_key.unwrap(),
     );
     messages.send_message(other_message).unwrap();
     messages.send_message(expected_message).unwrap();

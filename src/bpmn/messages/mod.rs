@@ -34,7 +34,7 @@ impl RawMessage {
 #[derive(Debug, Clone)]
 pub struct MessageMetaData {
     /// Correlation key for matching messages.
-    pub correlation_key: CorrelationKey,
+    pub correlation_key: Option<CorrelationKey>,
     /// Additional context for message-based access control.
     pub context: Context,
 }
@@ -43,9 +43,14 @@ impl MessageMetaData {
     /// Creates new message metadata with the given correlation key and context.
     pub fn new(correlation_key: CorrelationKey, context: Context) -> Self {
         Self {
-            correlation_key,
+            correlation_key: Some(correlation_key),
             context,
         }
+    }
+
+    /// Checks if the message is used to start a new process instance, which is the case if it has no correlation key.
+    pub fn used_to_start_process(&self) -> bool {
+        self.correlation_key.is_none()
     }
 }
 
@@ -78,9 +83,15 @@ impl Messages {
 
     /// Stores and broadcasts a typed message for the given key.
     pub fn send<T: Value>(&self, meta_data: MessageMetaData, value: T) {
-        self.data
-            .insert(meta_data.correlation_key, RawMessage::new(value));
-        let _ = self.sender.send(meta_data);
+        match meta_data.correlation_key {
+            Some(key) => {
+                self.data.insert(key, RawMessage::new(value));
+                let _ = self.sender.send(meta_data);
+            }
+            None => {
+                todo!("Start new process instance with message as input, not implemented yet")
+            }
+        };
     }
 
     /// Retrieves a typed message by key if present and of matching type.

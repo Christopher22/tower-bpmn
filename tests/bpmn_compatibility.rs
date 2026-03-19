@@ -1,6 +1,6 @@
 use axum_bpmn::{
     InMemory, IncomingMessage, Process, ProcessBuilder, Runtime, Step, Storage, Token,
-    messages::{Context, CorrelationKey, Message},
+    messages::{CorrelationKey, Message},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,11 +77,8 @@ impl Process for ThrowMessageProcess {
             .throw_message(
                 "message-throw-event",
                 MessageTarget,
-                |_token: &Token<S>, (correlation_key, payload): (CorrelationKey, i32)| Message {
-                    process: MessageTarget,
-                    payload,
-                    correlation_key,
-                    context: Context::default(),
+                |_token: &Token<S>, (correlation_key, payload): (CorrelationKey, i32)| {
+                    Message::with_key(MessageTarget, payload, correlation_key)
                 },
             )
             .then("complete", |_token, (_key, payload)| payload)
@@ -170,21 +167,11 @@ async fn correlation_keys_isolate_parallel_message_instances() {
 
     runtime
         .messages
-        .send_message(Message {
-            process: MessageTarget,
-            payload: 7,
-            correlation_key: key_b,
-            context: Context::default(),
-        })
+        .send_message(Message::with_key(MessageTarget, 7, key_b))
         .expect("message for key_b must be accepted");
     runtime
         .messages
-        .send_message(Message {
-            process: MessageTarget,
-            payload: 5,
-            correlation_key: key_a,
-            context: Context::default(),
-        })
+        .send_message(Message::with_key(MessageTarget, 5, key_a))
         .expect("message for key_a must be accepted");
 
     let (token_a, token_b) = tokio::join!(

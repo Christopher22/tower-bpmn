@@ -23,7 +23,7 @@ impl InnerRouter {
                 broker.send_message(Message {
                     process: process.clone(),
                     payload: value,
-                    correlation_key,
+                    correlation_key: Some(correlation_key),
                     context,
                 })
             }),
@@ -67,12 +67,12 @@ impl MessageBroker {
     /// This is used for dynamic message sending where the process type and payload type are not known at compile time.
     pub fn send_message_dynamic(
         &self,
-        process_name: ProcessName,
+        process_name: &ProcessName,
         correlation_key: CorrelationKey,
         payload: serde_json::Value,
         context: Context,
     ) -> Result<(), MessageError> {
-        match self.0.get(&process_name) {
+        match self.0.get(process_name) {
             Some(messages) => {
                 messages.dynamic_send.as_ref()(self, correlation_key, payload, context)
             }

@@ -2,14 +2,18 @@ use std::borrow::Cow;
 
 use crate::Storage;
 
-use super::{ProcessBuilder, Value};
+use super::{ProcessBuilder, Value, messages::Participant};
 
 /// A BPMN process definition.
 pub trait Process: 'static + Clone + Sized + Send + Sync {
     /// Input payload type for starting a process instance.
     type Input: Value;
+
     /// Final output payload type of the process.
     type Output: Value;
+
+    /// Initial owner of process instances, which determines which participants can start the process.
+    const INITIAL_OWNER: Participant = Participant::Everyone;
 
     /// Process meta data for registration and dispatch.
     fn metadata(&self) -> &MetaData;

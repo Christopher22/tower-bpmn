@@ -67,9 +67,27 @@ pub struct Message<P: Process, V: Value> {
     /// Typed payload.
     pub payload: V,
     /// Correlation key used for message matching.
-    pub correlation_key: CorrelationKey,
+    pub correlation_key: Option<CorrelationKey>,
     /// The context of the message.
     pub context: Context,
+}
+
+impl<P: Process> Message<P, P::Input> {
+    /// Creates a new message for starting a process instance with the given payload.
+    pub fn for_starting(process: P, payload: P::Input) -> Option<Self> {
+        let context = Context::new_matching(P::INITIAL_OWNER)?;
+        Some(Message {
+            process,
+            payload,
+            correlation_key: None,
+            context,
+        })
+    }
+
+    /// Checks if the message can be used to start a new process instance.
+    pub fn can_start_process(&self) -> bool {
+        self.correlation_key.is_none() && self.context.is_suitable_for(&P::INITIAL_OWNER)
+    }
 }
 
 impl<P: Process, V: Value> Message<P, V> {
@@ -78,7 +96,17 @@ impl<P: Process, V: Value> Message<P, V> {
         Message {
             process,
             payload,
-            correlation_key: CorrelationKey::new(),
+            correlation_key: Some(CorrelationKey::new()),
+            context: Context::default(),
+        }
+    }
+
+    /// Creates a new message with the given correlation key and default context.
+    pub fn with_key(process: P, payload: V, correlation_key: CorrelationKey) -> Self {
+        Message {
+            process,
+            payload,
+            correlation_key: Some(correlation_key),
             context: Context::default(),
         }
     }
