@@ -167,11 +167,11 @@ async fn correlation_keys_isolate_parallel_message_instances() {
 
     runtime
         .messages
-        .send_message(Message::with_key(MessageTarget, 7, key_b))
+        .send(Message::with_key(MessageTarget, 7, key_b))
         .expect("message for key_b must be accepted");
     runtime
         .messages
-        .send_message(Message::with_key(MessageTarget, 5, key_a))
+        .send(Message::with_key(MessageTarget, 5, key_a))
         .expect("message for key_a must be accepted");
 
     let (token_a, token_b) = tokio::join!(

@@ -12,15 +12,21 @@ pub struct Instances<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
     pub registered_process: RegisteredProcess<E, B>,
     instances: DashMap<InstanceId, Instance<E, B>>,
     executor: E,
+    storage_backend: B,
 }
 
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instances<E, B> {
     /// Create a new instance object.
-    pub fn new(registered_process: RegisteredProcess<E, B>, executor: E) -> Self {
+    pub fn new(
+        registered_process: RegisteredProcess<E, B>,
+        executor: E,
+        storage_backend: B,
+    ) -> Self {
         Instances {
             registered_process,
             instances: DashMap::new(),
             executor,
+            storage_backend,
         }
     }
 
@@ -47,10 +53,10 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instances<E, B> {
 
     /// Run a new instance. Used internally by the runtime.
     /// This should not be called directly, because the value is not checked and will panic if not match the registered process.
-    pub(super) fn run<V: Value>(&self, storage_backend: &B, input: V) -> InstanceId {
+    pub(crate) fn run<V: Value>(&self, input: V) -> InstanceId {
         let instance = Instance::new(
             &self.registered_process,
-            storage_backend,
+            &self.storage_backend,
             self.executor.clone(),
             input,
         );
@@ -60,11 +66,12 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instances<E, B> {
     }
 
     /// Try to resume a paused instance.
-    pub fn resume(&self, storage_backend: &B, id: InstanceId) -> Result<InstanceId, ResumeError> {
+    pub fn resume(&self, id: InstanceId) -> Result<InstanceId, ResumeError> {
         let instance = Instance::resume(
             &self.registered_process,
             self.executor.clone(),
-            storage_backend.resume_instance(&self.registered_process, id)?,
+            self.storage_backend
+                .resume_instance(&self.registered_process, id)?,
         );
         let id = instance.id;
         self.instances.insert(id, instance);

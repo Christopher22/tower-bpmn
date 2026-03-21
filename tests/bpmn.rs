@@ -496,11 +496,11 @@ async fn test_correlation_keys_isolate_parallel_message_instances() {
 
     runtime
         .messages
-        .send_message(Message::with_key(MessageTarget, 7, key_b))
+        .send(Message::with_key(MessageTarget, 7, key_b))
         .unwrap();
     runtime
         .messages
-        .send_message(Message::with_key(MessageTarget, 5, key_a))
+        .send(Message::with_key(MessageTarget, 5, key_a))
         .unwrap();
 
     let (token_a, token_b) = tokio::join!(
@@ -522,7 +522,7 @@ async fn test_message_catch_with_early_send_buffers_correctly() {
     // Simulate BPMN spec: incoming messages before the catch event is active should be buffered securely.
     runtime
         .messages
-        .send_message(Message::with_key(MessageTarget, 10, key))
+        .send(Message::with_key(MessageTarget, 10, key))
         .unwrap();
 
     let waiter = runtime.run(WaitForMessageProcess, key).unwrap();
@@ -562,10 +562,10 @@ async fn test_wait_for_message_post_processing_logic() {
 
     runtime
         .messages
-        .send_message(Message {
+        .send(Message {
             process: MessageTarget,
             payload: 11, // Expect * 3 post-process
-            correlation_key: Some(key),
+            correlation_key: key,
             context: Context::default(),
         })
         .unwrap();
@@ -692,7 +692,7 @@ async fn test_process_suspends_and_does_not_terminate_prematurely() {
     // Now fulfill the process
     runtime
         .messages
-        .send_message(Message::with_key(MessageTarget, 10, key))
+        .send(Message::with_key(MessageTarget, 10, key))
         .unwrap();
 
     let token = runtime

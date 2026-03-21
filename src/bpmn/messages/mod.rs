@@ -5,7 +5,9 @@ use dashmap::DashMap;
 use std::{any::Any, sync::Arc};
 use tokio::sync::broadcast::{Receiver, Sender};
 
-use crate::Value;
+use crate::{
+    ExtendedExecutor, InstanceId, InstanceSpawnError, Instances, Process, StorageBackend, Value,
+};
 
 mod broker;
 mod message;
@@ -32,39 +34,41 @@ impl RawMessage {
 
 /// Metadata, associated with a message, which can be used for correlation and access control.
 #[derive(Debug, Clone)]
-pub struct MessageMetaData {
+pub struct MessageMetaData<C = CorrelationKey> {
     /// Correlation key for matching messages.
-    pub correlation_key: Option<CorrelationKey>,
+    pub correlation_key: C,
     /// Additional context for message-based access control.
     pub context: Context,
 }
 
-impl MessageMetaData {
+impl<C> MessageMetaData<C> {
     /// Creates new message metadata with the given correlation key and context.
-    pub fn new(correlation_key: CorrelationKey, context: Context) -> Self {
+    pub fn new(correlation_key: C, context: Context) -> Self {
         Self {
-            correlation_key: Some(correlation_key),
+            correlation_key,
             context,
         }
     }
-
-    /// Checks if the message is used to start a new process instance, which is the case if it has no correlation key.
-    pub fn used_to_start_process(&self) -> bool {
-        self.correlation_key.is_none()
-    }
 }
 
-impl Default for MessageMetaData {
+impl<C: Default> Default for MessageMetaData<C> {
     fn default() -> Self {
-        Self::new(CorrelationKey::new(), Context::default())
+        Self::new(C::default(), Context::default())
     }
 }
+
+/// The callback for spawn a new process instance with a message, which is used for messages that start new process instances.
+type SpawnCallback = dyn Fn(Box<dyn Any + 'static>) -> Result<InstanceId, InstanceSpawnError>
+    + 'static
+    + Send
+    + Sync;
 
 /// Messages for a single process.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Messages {
     sender: Sender<MessageMetaData>,
     data: Arc<DashMap<CorrelationKey, RawMessage>>,
+    instance_spawn: Option<Arc<SpawnCallback>>,
 }
 
 impl Messages {
@@ -73,6 +77,7 @@ impl Messages {
         Messages {
             sender: tokio::sync::broadcast::channel(100).0,
             data: Arc::new(DashMap::new()),
+            instance_spawn: None,
         }
     }
 
@@ -81,29 +86,82 @@ impl Messages {
         self.sender.subscribe()
     }
 
-    /// Stores and broadcasts a typed message for the given key.
-    pub fn send<T: Value>(&self, meta_data: MessageMetaData, value: T) {
-        match meta_data.correlation_key {
-            Some(key) => {
-                self.data.insert(key, RawMessage::new(value));
-                let _ = self.sender.send(meta_data);
-            }
-            None => {
-                todo!("Start new process instance with message as input, not implemented yet")
-            }
-        };
-    }
-
     /// Retrieves a typed message by key if present and of matching type.
     pub fn receive<T: Value>(&self, key: CorrelationKey) -> Option<T> {
         self.data
             .get(&key)
             .and_then(|entry| entry.value.downcast_ref::<T>().cloned())
     }
+
+    /// Register a callback for spawning new process instances with messages, which is used for messages that start new process instances.
+    /// To ensure matching generic parameters, this should be called in the broker.
+    pub(super) fn register_spawn<P: Process, E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
+        &mut self,
+        instances: Arc<Instances<E, B>>,
+    ) {
+        self.instance_spawn = Some(Arc::new(move |value| match value.downcast::<P::Input>() {
+            Ok(input) => Ok(instances.run(*input)),
+            Err(_) => Err(InstanceSpawnError::InvalidInput(
+                "Message payload type does not match process input type".to_string(),
+            )),
+        }));
+    }
 }
 
 impl Default for Messages {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::fmt::Debug for Messages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Messages").finish_non_exhaustive()
+    }
+}
+
+/// A message which could be send.
+pub trait SendableMessage<P: Process> {
+    /// The result of trying to send the message.
+    type Result;
+
+    /// The target process of the message.
+    fn process(&self) -> &P;
+
+    /// Send the message.
+    fn send(self, messages: &Messages) -> Self::Result;
+}
+
+impl<P: Process, V: Value> SendableMessage<P> for Message<P, V, CorrelationKey> {
+    type Result = ();
+
+    fn process(&self) -> &P {
+        &self.process
+    }
+
+    fn send(self, messages: &Messages) -> Self::Result {
+        let (meta_data, value) = self.split();
+        messages
+            .data
+            .insert(meta_data.correlation_key, RawMessage::new(value));
+        let _ = messages.sender.send(meta_data);
+    }
+}
+
+impl<P: Process> SendableMessage<P> for Message<P, P::Input, ()> {
+    type Result = Result<InstanceId, InstanceSpawnError>;
+
+    fn process(&self) -> &P {
+        &self.process
+    }
+
+    fn send(self, messages: &Messages) -> Self::Result {
+        if let Some(value) = messages.instance_spawn.as_ref()
+            && self.context.is_suitable_for(&P::INITIAL_OWNER)
+        {
+            (value)(Box::new(self.payload))
+        } else {
+            Err(InstanceSpawnError::InvalidContext)
+        }
     }
 }

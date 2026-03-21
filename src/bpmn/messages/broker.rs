@@ -1,9 +1,9 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 
-use crate::{Process, ProcessName, Value};
+use crate::{ExtendedExecutor, Instances, Process, ProcessName, StorageBackend};
 
-use super::{Context, CorrelationKey, Message, Messages};
+use super::{Context, CorrelationKey, Message, Messages, SendableMessage};
 
 type Callback = dyn Fn(&MessageBroker, CorrelationKey, serde_json::Value, Context) -> Result<(), MessageError>
     + Send
@@ -20,10 +20,10 @@ impl InnerRouter {
             dynamic_send: Box::new(move |broker, correlation_key, payload, context| {
                 let value: P::Input =
                     serde_json::from_value(payload).map_err(|_| MessageError::InvalidType)?;
-                broker.send_message(Message {
+                broker.send(Message {
                     process: process.clone(),
                     payload: value,
-                    correlation_key: Some(correlation_key),
+                    correlation_key,
                     context,
                 })
             }),
@@ -50,13 +50,10 @@ impl MessageBroker {
     }
 
     /// Sends a message to the target process store.
-    pub fn send_message<P: Process, V: Value>(
-        &self,
-        message: Message<P, V>,
-    ) -> Result<(), MessageError> {
-        match self.0.get(&ProcessName::from(message.process.metadata())) {
+    pub fn send<P: Process, S: SendableMessage<P>>(&self, message: S) -> Result<(), MessageError> {
+        match self.0.get(&ProcessName::from(message.process().metadata())) {
             Some(messages) => {
-                messages.messages.send(message.metadata(), message.payload);
+                message.send(&messages.messages);
                 Ok(())
             }
             None => Err(MessageError::NoTarget),
@@ -65,7 +62,7 @@ impl MessageBroker {
 
     /// Sends a message to the target process serialized as JSON.
     /// This is used for dynamic message sending where the process type and payload type are not known at compile time.
-    pub fn send_message_dynamic(
+    pub fn send_dynamic(
         &self,
         process_name: &ProcessName,
         correlation_key: CorrelationKey,
@@ -90,6 +87,28 @@ impl MessageBroker {
                 let messages = inner_router.messages.clone();
                 entry.insert(inner_router);
                 messages
+            }
+        }
+    }
+
+    /// Registers a process to be spawned.
+    pub fn register_spawn<P: Process, E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
+        &self,
+        process: &P,
+        instances: Arc<Instances<E, B>>,
+    ) {
+        let process_name = ProcessName::from(process.metadata());
+        match self.0.entry(process_name) {
+            dashmap::Entry::Occupied(mut entry) => {
+                entry
+                    .get_mut()
+                    .messages
+                    .register_spawn::<P, E, B>(instances);
+            }
+            dashmap::Entry::Vacant(entry) => {
+                let mut inner_router = InnerRouter::new(process.clone());
+                inner_router.messages.register_spawn::<P, E, B>(instances);
+                entry.insert(inner_router);
             }
         }
     }

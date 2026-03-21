@@ -110,7 +110,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Api<E, B> {
             ("POST", ["processes", process_name, "messages"]) => {
                 let request: SendMessageRequest =
                     parse_json_body(body).await.and_then(decode_json_payload)?;
-                runtime.read().messages.send_message_dynamic(
+                runtime.read().messages.send_dynamic(
                     &process_name.parse::<ProcessName>()?,
                     request.correlation_key,
                     request.payload,

@@ -107,12 +107,7 @@ impl Process for ThrowingProcess {
     ) -> ProcessBuilder<Self, Self::Output, S> {
         builder
             .throw_message("throw", MessageTargetProcess, |_token, (key, payload)| {
-                Message {
-                    process: MessageTargetProcess,
-                    payload,
-                    correlation_key: Some(key),
-                    context: Context::default(),
-                }
+                Message::with_key(MessageTargetProcess, payload, key)
             })
             .then("done", |_token, (_key, payload)| payload)
     }
@@ -153,12 +148,7 @@ fn runtime_returns_unregistered_error_for_unknown_process() {
 #[test]
 fn message_manager_returns_no_target_when_process_not_registered() {
     let manager = MessageBroker::new();
-    let result = manager.send_message(Message {
-        process: MessageTargetProcess,
-        payload: 10,
-        correlation_key: Some(CorrelationKey::new()),
-        context: Context::default(),
-    });
+    let result = manager.send(Message::new(MessageTargetProcess, 10));
     assert_eq!(result, Err(MessageError::NoTarget));
 }
 
@@ -206,8 +196,8 @@ async fn incoming_message_waitable_returns_payload() {
     waitable.bind_messages(&messages);
 
     let message = Message::new(DummyProcess, 77_i32);
-    let key = message.correlation_key.unwrap();
-    messages.send_message(message).unwrap();
+    let key = message.correlation_key;
+    messages.send(message).unwrap();
 
     let value = waitable
         .wait_for(&Token::new(InMemoryStorage::for_test()), key)
@@ -226,10 +216,10 @@ async fn incoming_message_waitable_ignores_other_correlation_keys() {
 
     let wait_future = waitable.wait_for(
         &Token::new(InMemoryStorage::for_test()),
-        expected_message.correlation_key.unwrap(),
+        expected_message.correlation_key,
     );
-    messages.send_message(other_message).unwrap();
-    messages.send_message(expected_message).unwrap();
+    messages.send(other_message).unwrap();
+    messages.send(expected_message).unwrap();
 
     let value = timeout(TokioDuration::from_secs(1), wait_future)
         .await

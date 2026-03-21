@@ -107,7 +107,7 @@ impl<P: Process, E: Value> Waitable<P, CorrelationKey, E> for IncomingMessage<P,
             loop {
                 match receiver.recv().await {
                     Ok(MessageMetaData {
-                        correlation_key: Some(metadata_correlation_key),
+                        correlation_key: metadata_correlation_key,
                         context: _,
                     }) if metadata_correlation_key == correlation_key => {
                         if let Some(message) = messages.receive::<E>(correlation_key) {
@@ -151,19 +151,19 @@ impl<P: Process, E: Value> Waitable<P, GuardedCorrelationKey, E> for IncomingMes
             loop {
                 match receiver.recv().await {
                     Ok(MessageMetaData {
-                        correlation_key: Some(metadata_correlation_key),
+                        correlation_key,
                         context,
-                    }) if metadata_correlation_key == guarded_correlation_key.key
+                    }) if correlation_key == guarded_correlation_key.key
                         && context.is_suitable_for(&guarded_correlation_key.expected_sender) =>
                     {
-                        if let Some(message) = messages.receive::<E>(metadata_correlation_key) {
+                        if let Some(message) = messages.receive::<E>(correlation_key) {
                             return message;
                         }
                     }
                     Ok(MessageMetaData {
-                        correlation_key: Some(metadata_correlation_key),
+                        correlation_key,
                         context: _,
-                    }) if metadata_correlation_key == guarded_correlation_key.key => {
+                    }) if correlation_key == guarded_correlation_key.key => {
                         // Message with matching key but unsuitable sender, ignore.
                     }
                     Ok(_) => {

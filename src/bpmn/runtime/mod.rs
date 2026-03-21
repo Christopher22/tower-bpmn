@@ -5,7 +5,7 @@ mod storage;
 mod token;
 
 use serde_json::Value as JsonValue;
-use std::{any::TypeId, collections::HashMap};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{ExtendedExecutor, Process, ProcessBuilder, ProcessName, messages::MessageBroker};
 
@@ -21,7 +21,7 @@ pub use token::{Token, TokenId, Value};
 pub struct Runtime<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
     /// Message broker for inter-process communication.
     pub messages: MessageBroker,
-    registered_processes: HashMap<ProcessName, Instances<E, B>>,
+    registered_processes: HashMap<ProcessName, Arc<Instances<E, B>>>,
     executor: E,
     storage_backend: B,
 }
@@ -53,10 +53,14 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
             RegisteredProcess::try_from((process.define(builder), dynamic_api))?
         };
 
-        self.registered_processes.insert(
-            process_name,
-            Instances::new(raw_process, self.executor.clone()),
-        );
+        let instances = Arc::new(Instances::new(
+            raw_process,
+            self.executor.clone(),
+            self.storage_backend.clone(),
+        ));
+        self.messages.register_spawn(&process, instances.clone());
+        self.registered_processes.insert(process_name, instances);
+
         Ok(())
     }
 
@@ -76,7 +80,9 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
 
     /// Query the instances of a registered process by its name. Returns None if the process is not found.
     pub fn get_instances(&self, process_name: &ProcessName) -> Option<&Instances<E, B>> {
-        self.registered_processes.get(process_name)
+        self.registered_processes
+            .get(process_name)
+            .map(|instances| instances.as_ref())
     }
 
     /// Wait for a specific instance to complete and return the final context. Returns None if the instance is not found, or Some(Err) if the instance is not running.
@@ -118,12 +124,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
             .registered_processes
             .get(&ProcessName::from(process.metadata()))
         {
-            Some(registered_process)
-                if registered_process.registered_process.process_type == TypeId::of::<P>() =>
-            {
-                Ok(registered_process.run(&self.storage_backend, input))
-            }
-            Some(_) => Err(InstanceSpawnError::InvalidContext),
+            Some(registered_process) => Ok(registered_process.run(input)),
             None => Err(InstanceSpawnError::Unregistered),
         }
     }

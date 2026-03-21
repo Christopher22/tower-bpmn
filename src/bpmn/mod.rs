@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::{borrow::Cow, ops::IndexMut};
 
 use crate::executor::Executor;
+use crate::messages::SendableMessage;
 
 pub use self::process::{InvalidProcessNameError, MetaData, Process, ProcessName};
 pub use self::runtime::{
@@ -26,12 +27,14 @@ pub use self::waitable::{Bindable, IncomingMessage, Timer, Waitable};
 
 /// Executor abstraction required by the BPMN runtime.
 pub trait ExtendedExecutor<S: Storage>:
-    'static + Send + Executor<()> + Executor<crate::petri_net::Marking<State<S>>>
+    'static + Sync + Send + Executor<()> + Executor<crate::petri_net::Marking<State<S>>>
 {
 }
 
-impl<S: Storage, T: 'static + Send + Executor<()> + Executor<crate::petri_net::Marking<State<S>>>>
-    ExtendedExecutor<S> for T
+impl<
+    S: Storage,
+    T: 'static + Sync + Send + Executor<()> + Executor<crate::petri_net::Marking<State<S>>>,
+> ExtendedExecutor<S> for T
 {
 }
 
@@ -304,11 +307,11 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
     }
 
     /// Adds a throw-message task that emits a message for another process.
-    pub fn throw_message<P2: Process, V: Value>(
+    pub fn throw_message<P2: Process, SM: SendableMessage<P2>>(
         mut self,
         name: impl Into<Cow<'static, str>>,
         process: P2,
-        func: impl Fn(&Token<S>, E) -> messages::Message<P2, V> + 'static + Send + Sync,
+        func: impl Fn(&Token<S>, E) -> SM + 'static + Send + Sync,
     ) -> ProcessBuilder<P, E, S> {
         let name = self.steps.add(name.into()).expect("failed to add step");
         let sender = self.message_manager.get_messages_for_process(process);
@@ -316,8 +319,7 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
             current_place: self.add_next_place(BpmnStep::Task(
                 name,
                 Self::wrap_function::<false, _>(move |token, value| {
-                    let message = func(token, value);
-                    sender.send(message.metadata(), message.payload);
+                    func(token, value).send(&sender);
                 }),
             )),
             process: self.process,

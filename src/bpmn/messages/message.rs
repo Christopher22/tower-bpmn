@@ -61,42 +61,50 @@ pub struct GuardedCorrelationKey {
 
 /// A message to be sent to a process, which can be used for both sending messages to a waiting process and starting a new process instance with the message as input.
 #[derive(Debug)]
-pub struct Message<P: Process, V: Value> {
+pub struct Message<P: Process, V: Value, C = CorrelationKey> {
     /// Target process type.
     pub process: P,
     /// Typed payload.
     pub payload: V,
     /// Correlation key used for message matching.
-    pub correlation_key: Option<CorrelationKey>,
+    pub correlation_key: C,
     /// The context of the message.
     pub context: Context,
 }
 
-impl<P: Process> Message<P, P::Input> {
+impl<P: Process, V: Value, C> Message<P, V, C> {
+    /// Split metadata and payload of the message.
+    pub fn split(self) -> (MessageMetaData<C>, V) {
+        (
+            MessageMetaData {
+                correlation_key: self.correlation_key,
+                context: self.context,
+            },
+            self.payload,
+        )
+    }
+}
+
+impl<P: Process> Message<P, P::Input, ()> {
     /// Creates a new message for starting a process instance with the given payload.
     pub fn for_starting(process: P, payload: P::Input) -> Option<Self> {
         let context = Context::new_matching(P::INITIAL_OWNER)?;
         Some(Message {
             process,
             payload,
-            correlation_key: None,
+            correlation_key: (),
             context,
         })
     }
-
-    /// Checks if the message can be used to start a new process instance.
-    pub fn can_start_process(&self) -> bool {
-        self.correlation_key.is_none() && self.context.is_suitable_for(&P::INITIAL_OWNER)
-    }
 }
 
-impl<P: Process, V: Value> Message<P, V> {
+impl<P: Process, V: Value> Message<P, V, CorrelationKey> {
     /// Creates a new message with a random correlation key and default context.
     pub fn new(process: P, payload: V) -> Self {
         Message {
             process,
             payload,
-            correlation_key: Some(CorrelationKey::new()),
+            correlation_key: CorrelationKey::new(),
             context: Context::default(),
         }
     }
@@ -106,18 +114,8 @@ impl<P: Process, V: Value> Message<P, V> {
         Message {
             process,
             payload,
-            correlation_key: Some(correlation_key),
+            correlation_key,
             context: Context::default(),
-        }
-    }
-}
-
-impl<P: Process, V: Value> Message<P, V> {
-    /// Get the metadata of the message, which can be used for matching the message to waiting processes.
-    pub fn metadata(&self) -> MessageMetaData {
-        MessageMetaData {
-            correlation_key: self.correlation_key,
-            context: self.context.clone(),
         }
     }
 }
