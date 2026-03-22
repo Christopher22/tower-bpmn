@@ -55,7 +55,7 @@ pub struct Instance<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
 
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instance<E, B> {
     pub(super) fn new<V: Value>(
-        process: &RegisteredProcess<E, B>,
+        process: &RegisteredProcess<B>,
         storage_backend: &B,
         executor: E,
         input: V,
@@ -72,7 +72,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instance<E, B> {
     }
 
     pub(super) fn resume(
-        process: &RegisteredProcess<E, B>,
+        process: &RegisteredProcess<B>,
         executor: E,
         resumable_process: ResumableProcess<B>,
     ) -> Self {

@@ -9,7 +9,7 @@ use crate::{
 #[derive(Debug)]
 pub struct Instances<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
     /// The registered process definition for this set of instances.
-    pub registered_process: RegisteredProcess<E, B>,
+    pub registered_process: RegisteredProcess<B>,
     instances: DashMap<InstanceId, Instance<E, B>>,
     executor: E,
     storage_backend: B,
@@ -17,11 +17,7 @@ pub struct Instances<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
 
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instances<E, B> {
     /// Create a new instance object.
-    pub fn new(
-        registered_process: RegisteredProcess<E, B>,
-        executor: E,
-        storage_backend: B,
-    ) -> Self {
+    pub fn new(registered_process: RegisteredProcess<B>, executor: E, storage_backend: B) -> Self {
         Instances {
             registered_process,
             instances: DashMap::new(),

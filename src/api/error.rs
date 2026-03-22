@@ -32,6 +32,13 @@ impl ApiError {
         }
     }
 
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
+
     pub(super) fn into_response(self) -> Response<String> {
         json_response(
             self.status,
@@ -58,8 +65,11 @@ impl From<InstanceSpawnError> for ApiError {
 impl From<MessageError> for ApiError {
     fn from(error: MessageError) -> Self {
         match error {
-            MessageError::NoTarget => Self::conflict("no waiting instance for this message"),
+            MessageError::NoTarget => Self::conflict("no target for this message"),
             MessageError::InvalidType => Self::bad_request("invalid message type"),
+            MessageError::Forbidden => {
+                Self::forbidden("not allowed to send message in the waiting process")
+            }
         }
     }
 }

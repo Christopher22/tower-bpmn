@@ -3,45 +3,11 @@ use std::sync::Arc;
 
 use crate::{ExtendedExecutor, Instances, Process, ProcessName, StorageBackend};
 
-use super::{Context, CorrelationKey, Message, Messages, SendableMessage};
-
-type Callback = dyn Fn(&MessageBroker, CorrelationKey, serde_json::Value, Context) -> Result<(), MessageError>
-    + Send
-    + Sync;
-struct InnerRouter {
-    messages: Messages,
-    dynamic_send: Box<Callback>,
-}
-
-impl InnerRouter {
-    fn new<P: Process>(process: P) -> Self {
-        InnerRouter {
-            messages: Messages::new(),
-            dynamic_send: Box::new(move |broker, correlation_key, payload, context| {
-                let value: P::Input =
-                    serde_json::from_value(payload).map_err(|_| MessageError::InvalidType)?;
-                broker.send(Message {
-                    process: process.clone(),
-                    payload: value,
-                    correlation_key,
-                    context,
-                })
-            }),
-        }
-    }
-}
-
-impl std::fmt::Debug for InnerRouter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InnerRouter")
-            .field("messages", &self.messages)
-            .finish_non_exhaustive()
-    }
-}
+use super::{Messages, SendableWithTarget};
 
 #[derive(Debug, Clone)]
 /// Registry that maps process types to process-local message stores.
-pub struct MessageBroker(Arc<DashMap<ProcessName, InnerRouter>>);
+pub struct MessageBroker(Arc<DashMap<ProcessName, Messages>>);
 
 impl MessageBroker {
     /// Creates an empty message manager.
@@ -50,29 +16,9 @@ impl MessageBroker {
     }
 
     /// Sends a message to the target process store.
-    pub fn send<P: Process, S: SendableMessage<P>>(&self, message: S) -> Result<(), MessageError> {
-        match self.0.get(&ProcessName::from(message.process().metadata())) {
-            Some(messages) => {
-                message.send(&messages.messages);
-                Ok(())
-            }
-            None => Err(MessageError::NoTarget),
-        }
-    }
-
-    /// Sends a message to the target process serialized as JSON.
-    /// This is used for dynamic message sending where the process type and payload type are not known at compile time.
-    pub fn send_dynamic(
-        &self,
-        process_name: &ProcessName,
-        correlation_key: CorrelationKey,
-        payload: serde_json::Value,
-        context: Context,
-    ) -> Result<(), MessageError> {
-        match self.0.get(process_name) {
-            Some(messages) => {
-                messages.dynamic_send.as_ref()(self, correlation_key, payload, context)
-            }
+    pub fn send<S: SendableWithTarget>(&self, message: S) -> Result<S::Result, MessageError> {
+        match self.0.get(&message.target()) {
+            Some(messages) => Ok(message.send(&messages)),
             None => Err(MessageError::NoTarget),
         }
     }
@@ -81,11 +27,10 @@ impl MessageBroker {
     pub fn get_messages_for_process<P: Process>(&self, process: P) -> Messages {
         let process_name = ProcessName::from(process.metadata());
         match self.0.entry(process_name) {
-            dashmap::Entry::Occupied(entry) => entry.get().messages.clone(),
+            dashmap::Entry::Occupied(entry) => entry.get().clone(),
             dashmap::Entry::Vacant(entry) => {
-                let inner_router = InnerRouter::new(process);
-                let messages = inner_router.messages.clone();
-                entry.insert(inner_router);
+                let messages = Messages::new();
+                entry.insert(messages.clone());
                 messages
             }
         }
@@ -100,15 +45,12 @@ impl MessageBroker {
         let process_name = ProcessName::from(process.metadata());
         match self.0.entry(process_name) {
             dashmap::Entry::Occupied(mut entry) => {
-                entry
-                    .get_mut()
-                    .messages
-                    .register_spawn::<P, E, B>(instances);
+                entry.get_mut().register_spawn::<P, E, B>(instances);
             }
             dashmap::Entry::Vacant(entry) => {
-                let mut inner_router = InnerRouter::new(process.clone());
-                inner_router.messages.register_spawn::<P, E, B>(instances);
-                entry.insert(inner_router);
+                let mut messages = Messages::new();
+                messages.register_spawn::<P, E, B>(instances);
+                entry.insert(messages);
             }
         }
     }
@@ -127,15 +69,18 @@ pub enum MessageError {
     InvalidType,
     /// There is currently target for the message.
     NoTarget,
+    /// The context does not match.
+    Forbidden,
 }
 
 impl std::fmt::Display for MessageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MessageError::InvalidType => {
-                write!(f, "The message type does not match the expected type.")
+                write!(f, "the message type does not match the expected type")
             }
-            MessageError::NoTarget => write!(f, "There is currently target for the message."),
+            MessageError::NoTarget => write!(f, "there is currently target for the message"),
+            MessageError::Forbidden => write!(f, "the context does not match."),
         }
     }
 }

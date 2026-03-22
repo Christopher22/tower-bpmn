@@ -283,7 +283,7 @@ pub fn openapi<E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
         instances_post.request_body = Some(OpenApiRequestBody {
             required: true,
             content: json_content(object_schema(
-                [("input".to_string(), process.input_schema.clone())],
+                [("input".to_string(), process.input.json_schema.clone())],
                 ["input".to_string()],
             )),
         });
@@ -328,7 +328,7 @@ pub fn openapi<E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
                         "correlation_key".to_string(),
                         schema_for::<CorrelationKey>(),
                     ),
-                    ("payload".to_string(), process.input_schema.clone()),
+                    ("payload".to_string(), process.input.json_schema.clone()),
                 ],
                 ["correlation_key".to_string(), "payload".to_string()],
             )),

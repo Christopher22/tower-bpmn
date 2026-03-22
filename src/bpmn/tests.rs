@@ -191,9 +191,16 @@ fn xor_process_definition_registers_successfully() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn incoming_message_waitable_returns_payload() {
-    let mut waitable = IncomingMessage::<DummyProcess, i32>::new(DummyProcess, "incoming");
+    let start = {
+        let steps = StepsBuilder::default();
+        let start = steps.add_start();
+        steps.add_end();
+        steps.build().unwrap();
+        start
+    };
+    let mut waitable = IncomingMessage::<DummyProcess, i32>::new(DummyProcess, start.clone());
     let messages = MessageBroker::new();
-    waitable.bind_messages(&messages);
+    waitable.bind_messages(start, &messages);
 
     let message = Message::new(DummyProcess, 77_i32);
     let key = message.correlation_key;
@@ -207,9 +214,16 @@ async fn incoming_message_waitable_returns_payload() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn incoming_message_waitable_ignores_other_correlation_keys() {
-    let mut waitable = IncomingMessage::<DummyProcess, i32>::new(DummyProcess, "incoming");
+    let start = {
+        let steps = StepsBuilder::default();
+        let start = steps.add_start();
+        steps.add_end();
+        steps.build().unwrap();
+        start
+    };
+    let mut waitable = IncomingMessage::<DummyProcess, i32>::new(DummyProcess, start.clone());
     let messages = MessageBroker::new();
-    waitable.bind_messages(&messages);
+    waitable.bind_messages(start, &messages);
 
     let expected_message = Message::new(DummyProcess, 88_i32);
     let other_message = Message::new(DummyProcess, 11_i32);

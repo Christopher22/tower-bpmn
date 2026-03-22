@@ -11,7 +11,7 @@ use http_body::Body;
 use parking_lot::RwLock;
 use tower_service::Service;
 
-use crate::{ExtendedExecutor, ProcessName, Runtime, StorageBackend, messages};
+use crate::{ExtendedExecutor, ProcessName, Runtime, StorageBackend, messages::Message};
 
 use super::{
     error::ApiError,
@@ -93,7 +93,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Api<E, B> {
                 Ok(json_response(
                     StatusCode::ACCEPTED,
                     &StartInstanceResponse {
-                        instance_id: runtime.read().run_dynamic(&process_name, request.input)?,
+                        instance_id: runtime.read().run_dynamic(process_name, request.input)?,
                     },
                 ))
             }
@@ -107,15 +107,30 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Api<E, B> {
                         .ok_or_else(|| ApiError::not_found("unknown process"))?,
                 ))
             }
-            ("POST", ["processes", process_name, "messages"]) => {
+            ("POST", ["processes", process_name, step]) => {
                 let request: SendMessageRequest =
                     parse_json_body(body).await.and_then(decode_json_payload)?;
-                runtime.read().messages.send_dynamic(
-                    &process_name.parse::<ProcessName>()?,
-                    request.correlation_key,
+                let process_name = process_name.parse::<ProcessName>()?;
+
+                let runtime = runtime.read();
+                let instances = runtime
+                    .get_instances(&process_name)
+                    .ok_or_else(|| ApiError::not_found("unknown process"))?;
+
+                let step = instances
+                    .registered_process
+                    .steps
+                    .get(step)
+                    .ok_or_else(|| ApiError::not_found("unknown step"))?;
+
+                if let Err(error) = runtime.messages.send(Message::for_waiting_step(
+                    process_name,
+                    step,
                     request.payload,
-                    messages::Context::default(),
-                )?;
+                    request.correlation_key,
+                )) {
+                    return Err(ApiError::from(error));
+                }
 
                 Ok(json_response(
                     StatusCode::ACCEPTED,

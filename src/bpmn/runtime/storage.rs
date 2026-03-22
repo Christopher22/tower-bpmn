@@ -7,8 +7,7 @@ use chrono::DateTime;
 use dashmap::DashMap;
 
 use crate::{
-    ExtendedExecutor, InstanceId, ProcessName, RegisteredProcess, State, Step, Token, TokenId,
-    Value,
+    InstanceId, ProcessName, RegisteredProcess, State, Step, Token, TokenId, Value,
     petri_net::{Id, Place},
 };
 
@@ -18,16 +17,16 @@ pub trait StorageBackend: 'static + Clone + Sized + Send + Sync {
     type Storage: Storage;
 
     /// Register a new instance.
-    fn new_instance<E: ExtendedExecutor<Self::Storage>>(
+    fn new_instance(
         &self,
-        process: &RegisteredProcess<E, Self>,
+        process: &RegisteredProcess<Self>,
         process_id: InstanceId,
     ) -> Self::Storage;
 
     /// Resume an instance by its ID, returning the values of the PetriNet if the instance is found and belongs to the given process.
-    fn resume_instance<E: ExtendedExecutor<Self::Storage>>(
+    fn resume_instance(
         &self,
-        process: &RegisteredProcess<E, Self>,
+        process: &RegisteredProcess<Self>,
         process_id: InstanceId,
     ) -> Result<ResumableProcess<Self>, ResumeError>;
 
@@ -100,9 +99,9 @@ impl Default for InMemory {
 impl StorageBackend for InMemory {
     type Storage = InMemoryStorage;
 
-    fn new_instance<E: ExtendedExecutor<Self::Storage>>(
+    fn new_instance(
         &self,
-        _process: &RegisteredProcess<E, Self>,
+        _process: &RegisteredProcess<Self>,
         process_id: InstanceId,
     ) -> Self::Storage {
         let history = Arc::new(RawHistory {
@@ -113,9 +112,9 @@ impl StorageBackend for InMemory {
         InMemoryStorage(history)
     }
 
-    fn resume_instance<E: ExtendedExecutor<Self::Storage>>(
+    fn resume_instance(
         &self,
-        _process: &RegisteredProcess<E, Self>,
+        _process: &RegisteredProcess<Self>,
         _process_id: InstanceId,
     ) -> Result<ResumableProcess<Self>, ResumeError> {
         Err(ResumeError::NotFound)

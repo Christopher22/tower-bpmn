@@ -1,10 +1,7 @@
 use uuid::Uuid;
 
 use super::Context;
-use crate::{
-    Process, Value,
-    messages::{MessageMetaData, Participant},
-};
+use crate::{Process, ProcessName, Step, Value, messages::MessageMetaData};
 
 #[derive(
     Debug,
@@ -47,23 +44,11 @@ impl Default for CorrelationKey {
     }
 }
 
-/// A correlation key with an associated guard, which accepts messages only if the guard matches the message context.
-/// This can be used to implement message-based access control, e.g., for assigning tasks to specific participants and only accepting messages from those participants.
-#[derive(
-    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
-)]
-pub struct GuardedCorrelationKey {
-    /// Correlation key for matching messages.
-    pub key: CorrelationKey,
-    /// Expected sender of the message, used for access control.
-    pub expected_sender: Participant,
-}
-
 /// A message to be sent to a process, which can be used for both sending messages to a waiting process and starting a new process instance with the message as input.
 #[derive(Debug)]
-pub struct Message<P: Process, V: Value, C = CorrelationKey> {
-    /// Target process type.
-    pub process: P,
+pub struct Message<T, V, C = CorrelationKey> {
+    /// The target of the process.
+    pub target: T,
     /// Typed payload.
     pub payload: V,
     /// Correlation key used for message matching.
@@ -72,7 +57,7 @@ pub struct Message<P: Process, V: Value, C = CorrelationKey> {
     pub context: Context,
 }
 
-impl<P: Process, V: Value, C> Message<P, V, C> {
+impl<T, V, C> Message<T, V, C> {
     /// Split metadata and payload of the message.
     pub fn split(self) -> (MessageMetaData<C>, V) {
         (
@@ -83,6 +68,16 @@ impl<P: Process, V: Value, C> Message<P, V, C> {
             self.payload,
         )
     }
+
+    /// Change the target of the message, while keeping the payload and metadata unchanged.
+    pub fn map<T2>(self, callback: impl FnOnce(T) -> T2) -> Message<T2, V, C> {
+        Message {
+            target: callback(self.target),
+            payload: self.payload,
+            correlation_key: self.correlation_key,
+            context: self.context,
+        }
+    }
 }
 
 impl<P: Process> Message<P, P::Input, ()> {
@@ -90,7 +85,7 @@ impl<P: Process> Message<P, P::Input, ()> {
     pub fn for_starting(process: P, payload: P::Input) -> Option<Self> {
         let context = Context::new_matching(P::INITIAL_OWNER)?;
         Some(Message {
-            process,
+            target: process,
             payload,
             correlation_key: (),
             context,
@@ -98,11 +93,40 @@ impl<P: Process> Message<P, P::Input, ()> {
     }
 }
 
-impl<P: Process, V: Value> Message<P, V, CorrelationKey> {
-    /// Creates a new message with a random correlation key and default context.
-    pub fn new(process: P, payload: V) -> Self {
+impl Message<ProcessName, serde_json::Value, ()> {
+    /// Creates a new message for starting a process instance with the given payload.
+    pub fn for_dynamic_starting(process_name: ProcessName, payload: serde_json::Value) -> Self {
         Message {
-            process,
+            target: process_name,
+            payload,
+            correlation_key: (),
+            context: Context::default(),
+        }
+    }
+}
+
+impl Message<(ProcessName, Step), serde_json::Value, CorrelationKey> {
+    /// Create a message for a waiting step.
+    pub fn for_waiting_step(
+        process_name: ProcessName,
+        step: Step,
+        payload: serde_json::Value,
+        correlation_key: CorrelationKey,
+    ) -> Self {
+        Self {
+            target: (process_name, step),
+            payload,
+            correlation_key,
+            context: Context::default(),
+        }
+    }
+}
+
+impl<T, V: Value> Message<T, V, CorrelationKey> {
+    /// Creates a new message with a random correlation key and default context.
+    pub fn new(target: T, payload: V) -> Self {
+        Message {
+            target,
             payload,
             correlation_key: CorrelationKey::new(),
             context: Context::default(),
@@ -110,9 +134,9 @@ impl<P: Process, V: Value> Message<P, V, CorrelationKey> {
     }
 
     /// Creates a new message with the given correlation key and default context.
-    pub fn with_key(process: P, payload: V, correlation_key: CorrelationKey) -> Self {
+    pub fn with_key(target: T, payload: V, correlation_key: CorrelationKey) -> Self {
         Message {
-            process,
+            target,
             payload,
             correlation_key,
             context: Context::default(),

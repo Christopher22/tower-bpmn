@@ -14,13 +14,14 @@ use std::sync::Arc;
 use std::{borrow::Cow, ops::IndexMut};
 
 use crate::executor::Executor;
-use crate::messages::SendableMessage;
+use crate::messages::SendableWithFixedTarget;
 
 pub use self::process::{InvalidProcessNameError, MetaData, Process, ProcessName};
 pub use self::runtime::{
-    Handle, InMemory, InMemoryStorage, Instance, InstanceId, InstanceNotRunning,
-    InstanceSpawnError, InstanceStatus, Instances, ProcessError, RegisteredProcess,
-    ResumableProcess, ResumeError, Runtime, Storage, StorageBackend, Token, TokenId, Value,
+    DynamicInput, DynamicValue, Handle, InMemory, InMemoryStorage, Instance, InstanceId,
+    InstanceNotRunning, InstanceSpawnError, InstanceStatus, Instances, ProcessError,
+    RegisteredProcess, ResumableProcess, ResumeError, Runtime, Storage, StorageBackend, Token,
+    TokenId, Value,
 };
 pub use self::steps::{InvalidStep, Step, Steps, StepsBuilder, UnfinishedBuilder};
 pub use self::waitable::{Bindable, IncomingMessage, Timer, Waitable};
@@ -307,7 +308,7 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
     }
 
     /// Adds a throw-message task that emits a message for another process.
-    pub fn throw_message<P2: Process, SM: SendableMessage<P2>>(
+    pub fn throw_message<P2: Process, SM: SendableWithFixedTarget<P2>>(
         mut self,
         name: impl Into<Cow<'static, str>>,
         process: P2,
@@ -358,7 +359,7 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
     ) -> ProcessBuilder<P, O, S> {
         let name = self.steps.add(waitable.name()).expect("failed to add step");
 
-        waitable.bind_messages(&self.message_manager);
+        waitable.bind_messages(name.clone(), &self.message_manager);
         let waitable = Arc::new(waitable);
         let generator = Box::new(move |name: Step, state: Vec<Token<S>>| {
             let waitable = waitable.clone();

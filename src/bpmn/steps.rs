@@ -213,6 +213,24 @@ impl PartialEq for Step {
     }
 }
 
+impl<'a> From<&'a Step> for std::borrow::Cow<'a, str> {
+    fn from(step: &'a Step) -> Self {
+        std::borrow::Cow::Borrowed(step.as_str())
+    }
+}
+
+impl From<Step> for std::borrow::Cow<'static, str> {
+    fn from(step: Step) -> Self {
+        std::borrow::Cow::Owned((*step.0).clone())
+    }
+}
+
+impl std::hash::Hash for Step {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).hash(state);
+    }
+}
+
 impl PartialEq<str> for Step {
     fn eq(&self, other: &str) -> bool {
         self.0.as_str() == other

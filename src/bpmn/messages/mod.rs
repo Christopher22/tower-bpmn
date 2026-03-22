@@ -6,7 +6,8 @@ use std::{any::Any, sync::Arc};
 use tokio::sync::broadcast::{Receiver, Sender};
 
 use crate::{
-    ExtendedExecutor, InstanceId, InstanceSpawnError, Instances, Process, StorageBackend, Value,
+    DynamicInput, DynamicValue, ExtendedExecutor, InstanceId, InstanceSpawnError, Instances,
+    MetaData, Process, ProcessName, Step, StorageBackend, Value,
 };
 
 mod broker;
@@ -14,7 +15,7 @@ mod message;
 mod participant;
 
 pub use self::broker::{MessageBroker, MessageError};
-pub use self::message::{CorrelationKey, GuardedCorrelationKey, Message};
+pub use self::message::{CorrelationKey, Message};
 pub use self::participant::{Context, Participant};
 
 #[derive(Debug)]
@@ -28,6 +29,15 @@ impl RawMessage {
         RawMessage {
             _timestamp: chrono::Utc::now(),
             value: Box::new(value),
+        }
+    }
+}
+
+impl From<DynamicValue> for RawMessage {
+    fn from(value: DynamicValue) -> Self {
+        RawMessage {
+            _timestamp: chrono::Utc::now(),
+            value: value.into(),
         }
     }
 }
@@ -68,7 +78,8 @@ type SpawnCallback = dyn Fn(Box<dyn Any + 'static>) -> Result<InstanceId, Instan
 pub struct Messages {
     sender: Sender<MessageMetaData>,
     data: Arc<DashMap<CorrelationKey, RawMessage>>,
-    instance_spawn: Option<Arc<SpawnCallback>>,
+    dynamic_spawn: Option<(DynamicInput, Arc<SpawnCallback>)>,
+    dynamic_send: Arc<DashMap<Step, DynamicInput>>,
 }
 
 impl Messages {
@@ -77,8 +88,14 @@ impl Messages {
         Messages {
             sender: tokio::sync::broadcast::channel(100).0,
             data: Arc::new(DashMap::new()),
-            instance_spawn: None,
+            dynamic_spawn: None,
+            dynamic_send: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Send a message without routing.
+    pub fn send<S: Sendable>(&self, message: S) -> S::Result {
+        message.send(self)
     }
 
     /// Subscribes to correlation-key notifications for newly sent messages.
@@ -93,18 +110,50 @@ impl Messages {
             .and_then(|entry| entry.value.downcast_ref::<T>().cloned())
     }
 
+    /// Register a callback for sending dynamic input to waiting processes.
+    pub(crate) fn register_input_for_step<V: Value>(&self, step: Step, owner: Participant) {
+        self.dynamic_send
+            .insert(step, DynamicInput::new::<V>(owner));
+    }
+
     /// Register a callback for spawning new process instances with messages, which is used for messages that start new process instances.
     /// To ensure matching generic parameters, this should be called in the broker.
     pub(super) fn register_spawn<P: Process, E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
         &mut self,
         instances: Arc<Instances<E, B>>,
     ) {
-        self.instance_spawn = Some(Arc::new(move |value| match value.downcast::<P::Input>() {
-            Ok(input) => Ok(instances.run(*input)),
-            Err(_) => Err(InstanceSpawnError::InvalidInput(
-                "Message payload type does not match process input type".to_string(),
-            )),
-        }));
+        self.dynamic_spawn = Some((
+            DynamicInput::for_process::<P>(),
+            Arc::new(move |value| match value.downcast::<P::Input>() {
+                Ok(input) => Ok(instances.run(*input)),
+                Err(_) => Err(InstanceSpawnError::InvalidInput(
+                    "Message payload type does not match process input type".to_string(),
+                )),
+            }),
+        ));
+    }
+
+    fn send_raw(&self, meta_data: MessageMetaData, value: RawMessage) {
+        self.data.insert(meta_data.correlation_key, value);
+        let _ = self.sender.send(meta_data);
+    }
+
+    fn try_spawn(
+        &self,
+        context: &Context,
+        callback: impl FnOnce(
+            &DynamicInput,
+            &Arc<SpawnCallback>,
+        ) -> Result<InstanceId, InstanceSpawnError>,
+    ) -> Result<InstanceId, InstanceSpawnError> {
+        if let Some((input, instance_spawn)) = self.dynamic_spawn.as_ref() {
+            if !context.is_suitable_for(&input.responsible) {
+                return Err(InstanceSpawnError::InvalidContext);
+            }
+            callback(input, instance_spawn)
+        } else {
+            Err(InstanceSpawnError::InvalidContext)
+        }
     }
 }
 
@@ -120,48 +169,166 @@ impl std::fmt::Debug for Messages {
     }
 }
 
-/// A message which could be send.
-pub trait SendableMessage<P: Process> {
-    /// The result of trying to send the message.
-    type Result;
+/// The target of a message.
+pub trait Target {
+    /// The name of the target process.
+    fn target_process(&self) -> ProcessName;
+}
 
-    /// The target process of the message.
-    fn process(&self) -> &P;
+impl<P: Process> Target for P {
+    fn target_process(&self) -> ProcessName {
+        ProcessName::from(self.metadata())
+    }
+}
+
+impl Target for MetaData {
+    fn target_process(&self) -> ProcessName {
+        ProcessName::from(self)
+    }
+}
+
+impl Target for ProcessName {
+    fn target_process(&self) -> ProcessName {
+        self.clone()
+    }
+}
+
+impl<T: Target> Target for (T, Step) {
+    fn target_process(&self) -> ProcessName {
+        self.0.target_process()
+    }
+}
+
+/// A item which is sendable.
+pub trait Sendable {
+    /// The result type of sending the message.
+    type Result;
 
     /// Send the message.
     fn send(self, messages: &Messages) -> Self::Result;
 }
 
-impl<P: Process, V: Value> SendableMessage<P> for Message<P, V, CorrelationKey> {
-    type Result = ();
+/// A message which could be send with routing in
+pub trait SendableWithTarget: Sendable {
+    /// The target process of the message.
+    fn target(&self) -> ProcessName;
+}
 
-    fn process(&self) -> &P {
-        &self.process
-    }
+/// A message which could be send with a fixed target process, which is used for messages with a statically known target process type, e.g., messages sent to waiting processes.
+/// This can be used to ensure that the message is only sent to the intended process type.
+pub trait SendableWithFixedTarget<P: Process>: SendableWithTarget {}
+
+// ------------------
+// Everything for spawning new processes
+// ------------------
+
+impl Sendable for DynamicValue {
+    type Result = Result<InstanceId, InstanceSpawnError>;
 
     fn send(self, messages: &Messages) -> Self::Result {
-        let (meta_data, value) = self.split();
-        messages
-            .data
-            .insert(meta_data.correlation_key, RawMessage::new(value));
-        let _ = messages.sender.send(meta_data);
+        messages.try_spawn(&Context::default(), |_, spawner| spawner(self.to_box()))
     }
 }
 
-impl<P: Process> SendableMessage<P> for Message<P, P::Input, ()> {
+impl Sendable for serde_json::Value {
     type Result = Result<InstanceId, InstanceSpawnError>;
 
-    fn process(&self) -> &P {
-        &self.process
+    fn send(self, messages: &Messages) -> Self::Result {
+        messages.try_spawn(&Context::default(), |dynamic_input, spawner| {
+            let value = dynamic_input.cast(self).map_err(|_| {
+                InstanceSpawnError::InvalidInput(
+                    "Failed to cast JSON value to process input".to_string(),
+                )
+            })?;
+            spawner(value.to_box())
+        })
     }
+}
+
+impl<P: Process> Sendable for Message<P, P::Input, ()> {
+    type Result = Result<InstanceId, InstanceSpawnError>;
 
     fn send(self, messages: &Messages) -> Self::Result {
-        if let Some(value) = messages.instance_spawn.as_ref()
-            && self.context.is_suitable_for(&P::INITIAL_OWNER)
-        {
-            (value)(Box::new(self.payload))
-        } else {
-            Err(InstanceSpawnError::InvalidContext)
-        }
+        messages.try_spawn(&self.context, |_, spawner| spawner(Box::new(self.payload)))
     }
+}
+
+impl Sendable for Message<ProcessName, DynamicValue, ()> {
+    type Result = Result<InstanceId, InstanceSpawnError>;
+
+    fn send(self, messages: &Messages) -> Self::Result {
+        messages.try_spawn(&self.context, |_, spawner| spawner(self.payload.to_box()))
+    }
+}
+
+impl Sendable for Message<ProcessName, serde_json::Value, ()> {
+    type Result = Result<InstanceId, InstanceSpawnError>;
+
+    fn send(self, messages: &Messages) -> Self::Result {
+        messages.try_spawn(&self.context, |dynamic_input, spawner| {
+            let value = dynamic_input.cast(self.payload).map_err(|_| {
+                InstanceSpawnError::InvalidInput(
+                    "Failed to cast JSON value to process input".to_string(),
+                )
+            })?;
+            spawner(value.to_box())
+        })
+    }
+}
+
+// -------------
+// Everything to send messages to waiting processes.
+// -------------
+impl<P: Process, V: Value> Sendable for Message<P, V, CorrelationKey> {
+    type Result = ();
+
+    fn send(self, messages: &Messages) -> Self::Result {
+        let (meta_data, value) = self.split();
+        messages.send_raw(meta_data, RawMessage::new(value));
+    }
+}
+
+impl Sendable for Message<Step, serde_json::Value, CorrelationKey> {
+    type Result = Result<(), MessageError>;
+
+    fn send(self, messages: &Messages) -> Self::Result {
+        let dynamic_input = messages
+            .dynamic_send
+            .get(&self.target)
+            .ok_or(MessageError::NoTarget)?;
+
+        if self.context.is_suitable_for(&dynamic_input.responsible) {
+            return Err(MessageError::Forbidden);
+        }
+
+        let (meta_data, value) = self.split();
+        let input = dynamic_input
+            .cast(value)
+            .map_err(|_| MessageError::InvalidType)?;
+
+        messages.send_raw(meta_data, input.into());
+        Ok(())
+    }
+}
+
+impl<T: Target> Sendable for Message<(T, Step), serde_json::Value, CorrelationKey> {
+    type Result = Result<(), MessageError>;
+
+    fn send(self, messages: &Messages) -> Self::Result {
+        self.map(|target| target.1).send(messages)
+    }
+}
+
+impl<P: Target, V, C> SendableWithTarget for Message<P, V, C>
+where
+    Message<P, V, C>: Sendable,
+{
+    fn target(&self) -> ProcessName {
+        self.target.target_process()
+    }
+}
+
+impl<P: Process, V, C> SendableWithFixedTarget<P> for Message<P, V, C> where
+    Message<P, V, C>: SendableWithTarget
+{
 }

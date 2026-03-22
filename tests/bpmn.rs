@@ -563,7 +563,7 @@ async fn test_wait_for_message_post_processing_logic() {
     runtime
         .messages
         .send(Message {
-            process: MessageTarget,
+            target: MessageTarget,
             payload: 11, // Expect * 3 post-process
             correlation_key: key,
             context: Context::default(),

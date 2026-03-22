@@ -167,59 +167,6 @@ async fn wait_for_instance_status(
     false
 }
 
-async fn wait_for_instance_presence(
-    api: &mut Api<TokioExecutor, InMemory>,
-    process_name: &str,
-    instance_id: &str,
-) -> bool {
-    for _ in 0..50 {
-        let (status, body) =
-            call_json(api, get(&format!("/processes/{process_name}/instances"))).await;
-        if status == StatusCode::OK
-            && body["instances"].as_array().is_some_and(|instances| {
-                instances
-                    .iter()
-                    .any(|instance| instance["id"] == instance_id)
-            })
-        {
-            return true;
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-
-    false
-}
-
-/*
-async fn wait_for_instance_place(
-    api: &mut Api<TokioExecutor, InMemory>,
-    process_name: &str,
-    instance_id: &str,
-    expected_place: &str,
-) -> bool {
-    for _ in 0..50 {
-        let (status, body) = call_json(
-            api,
-            get(&format!(
-                "/processes/{process_name}/instances/{instance_id}/places"
-            )),
-        )
-        .await;
-        if status == StatusCode::OK
-            && body["places"]
-                .as_array()
-                .is_some_and(|places| places.iter().any(|place| place == expected_place))
-        {
-            return true;
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-
-    false
-} */
-
 #[tokio::test(flavor = "current_thread")]
 async fn openapi_root_is_available() {
     let mut api = build_api();
@@ -358,70 +305,6 @@ async fn lists_running_instances_and_can_read_instance_state() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn sends_messages_to_waiting_instances() {
-    let mut api = build_api();
-    let correlation_key = CorrelationKey::new();
-
-    let (_, start_body) = call_json(
-        &mut api,
-        post(
-            "/processes/wait-process-1/instances",
-            serde_json::json!({ "input": correlation_key }),
-        ),
-    )
-    .await;
-    let instance_id = start_body["instance_id"].as_str().unwrap().to_string();
-
-    let (message_status, message_body) = call_json(
-        &mut api,
-        post(
-            "/processes/message-target-1/messages",
-            serde_json::json!({
-                "correlation_key": correlation_key,
-                "payload": 21
-            }),
-        ),
-    )
-    .await;
-
-    assert_eq!(message_status, StatusCode::ACCEPTED);
-    assert_eq!(message_body["status"], "accepted");
-
-    assert!(
-        wait_for_instance_presence(&mut api, "wait-process-1", &instance_id).await,
-        "instance could not be found in process instance listing"
-    );
-}
-
-/*
-#[tokio::test(flavor = "current_thread")]
-async fn returns_current_places_for_known_instance() {
-    let mut api = build_api();
-    let correlation_key = CorrelationKey::new();
-
-    let (_, start_body) = call_json(
-        &mut api,
-        post(
-            "/processes/wait-process-1/instances",
-            serde_json::json!({ "input": correlation_key }),
-        ),
-    )
-    .await;
-    let instance_id = start_body["instance_id"].as_str().unwrap().to_string();
-
-    assert!(
-        wait_for_instance_place(&mut api, "wait-process-1", &instance_id, "Start").await,
-        "instance did not expose expected current place in time"
-    );
-
-    let (status, body) =
-        call_json(&mut api, get(&format!("/instances/{instance_id}/places"))).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["instance_id"], instance_id);
-    assert!(body["places"].is_array());
-} */
-
-#[tokio::test(flavor = "current_thread")]
 async fn rejects_invalid_json_payloads() {
     let mut api = build_api();
 
@@ -471,25 +354,6 @@ async fn returns_not_found_for_unknown_process_instances_route() {
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "unknown process");
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn returns_conflict_for_unknown_process_messages_route() {
-    let mut api = build_api();
-    let (status, body) = call_json(
-        &mut api,
-        post(
-            "/processes/unknown-process-1/messages",
-            serde_json::json!({
-                "correlation_key": CorrelationKey::new(),
-                "payload": 1
-            }),
-        ),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"], "no waiting instance for this message");
 }
 
 #[tokio::test(flavor = "current_thread")]

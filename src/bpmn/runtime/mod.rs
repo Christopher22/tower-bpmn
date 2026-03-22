@@ -1,3 +1,4 @@
+mod dynamic;
 mod instance;
 mod instances;
 mod registered_process;
@@ -7,8 +8,12 @@ mod token;
 use serde_json::Value as JsonValue;
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{ExtendedExecutor, Process, ProcessBuilder, ProcessName, messages::MessageBroker};
+use crate::{
+    ExtendedExecutor, Process, ProcessBuilder, ProcessName,
+    messages::{Message, MessageBroker, MessageError},
+};
 
+pub use dynamic::{DynamicInput, DynamicValue};
 pub use instance::{Handle, Instance, InstanceId, InstanceNotRunning, InstanceStatus};
 pub use instances::{InstanceSpawnError, Instances};
 pub use registered_process::RegisteredProcess;
@@ -44,13 +49,10 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
     ) -> Result<(), ProcessError> {
         let metadata = process.metadata().clone();
         let process_name = ProcessName::from(&metadata);
-        // Prepare dynamic dispatch
-        let process_for_start = process.clone();
-        let dynamic_api = registered_process::DynamicCaller::new(process_for_start);
 
         let raw_process = {
             let builder = ProcessBuilder::new(metadata, self.messages.clone());
-            RegisteredProcess::try_from((process.define(builder), dynamic_api))?
+            RegisteredProcess::try_from(process.define(builder))?
         };
 
         let instances = Arc::new(Instances::new(
@@ -65,14 +67,14 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
     }
 
     /// Return all registered processes.
-    pub fn registered_processes(&self) -> impl Iterator<Item = &RegisteredProcess<E, B>> {
+    pub fn registered_processes(&self) -> impl Iterator<Item = &RegisteredProcess<B>> {
         self.registered_processes
             .values()
             .map(|value| &value.registered_process)
     }
 
     /// Query a registered process by its name. Returns None if the process is not found.
-    pub fn get_registered_process(&self, name: &ProcessName) -> Option<&RegisteredProcess<E, B>> {
+    pub fn get_registered_process(&self, name: &ProcessName) -> Option<&RegisteredProcess<B>> {
         self.registered_processes
             .get(name)
             .map(|instances| &instances.registered_process)
@@ -104,14 +106,19 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
     /// Starts a registered process by its name using JSON input.
     pub fn run_dynamic(
         &self,
-        process_name: &ProcessName,
+        process_name: ProcessName,
         input: JsonValue,
     ) -> Result<InstanceId, InstanceSpawnError> {
-        let process = self
-            .registered_processes
-            .get(process_name)
-            .ok_or(InstanceSpawnError::Unregistered)?;
-        process.registered_process.run_dynamic(self, input)
+        match self
+            .messages
+            .send(Message::for_dynamic_starting(process_name, input))
+        {
+            Ok(spawned_process) => spawned_process,
+            Err(MessageError::NoTarget) => Err(InstanceSpawnError::Unregistered),
+            Err(error) => {
+                panic!("Unexpected error while starting process: {}", error)
+            }
+        }
     }
 
     /// Run a process with the given input. The process will be executed in the background, and an instance handle will be returned for waiting for completion or resuming later.

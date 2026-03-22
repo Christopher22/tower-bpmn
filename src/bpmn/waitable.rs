@@ -3,14 +3,14 @@ use std::borrow::Cow;
 use chrono::DateTime;
 
 use crate::{
-    Process, Storage, Token, Value,
-    messages::{CorrelationKey, GuardedCorrelationKey, MessageBroker, MessageMetaData, Messages},
+    Process, Step, Storage, Token, Value,
+    messages::{CorrelationKey, MessageBroker, MessageMetaData, Messages, Participant},
 };
 
 /// Allow binding message channels to waitables, which can be used to implement message-based waiting events.
 pub trait Bindable {
     /// Optional hook to inject process-scoped message channels.
-    fn bind_messages(&mut self, _messages: &MessageBroker) {}
+    fn bind_messages(&mut self, _step: Step, _messages: &MessageBroker) {}
 }
 
 /// Asynchronous wait abstraction used for BPMN waiting events.
@@ -66,18 +66,33 @@ pub struct IncomingMessage<P: Process, E: Value>(
     Cow<'static, str>,
     Option<Messages>,
     std::marker::PhantomData<fn() -> E>,
+    Participant,
 );
 
 impl<P: Process, E: Value> IncomingMessage<P, E> {
     /// Creates a new incoming-message waitable.
     pub fn new(process: P, name: impl Into<Cow<'static, str>>) -> Self {
-        IncomingMessage(process, name.into(), None, std::marker::PhantomData)
+        IncomingMessage(
+            process,
+            name.into(),
+            None,
+            std::marker::PhantomData,
+            Participant::Everyone,
+        )
+    }
+
+    /// Limit the senders of messages.
+    pub fn with_guard(mut self, expected_sender: Participant) -> Self {
+        self.4 = expected_sender;
+        self
     }
 }
 
 impl<P: Process, E: Value> Bindable for IncomingMessage<P, E> {
-    fn bind_messages(&mut self, messages: &MessageBroker) {
-        self.2 = Some(messages.get_messages_for_process(self.0.clone()));
+    fn bind_messages(&mut self, step: Step, messages: &MessageBroker) {
+        let messages = messages.get_messages_for_process(self.0.clone());
+        messages.register_input_for_step::<E>(step, self.4.clone());
+        self.2 = Some(messages);
     }
 }
 
@@ -103,72 +118,23 @@ impl<P: Process, E: Value> Waitable<P, CorrelationKey, E> for IncomingMessage<P,
             return Box::pin(async move { message });
         }
 
+        let expected_sender = self.4.clone();
         Box::pin(async move {
             loop {
                 match receiver.recv().await {
                     Ok(MessageMetaData {
                         correlation_key: metadata_correlation_key,
-                        context: _,
+                        context,
                     }) if metadata_correlation_key == correlation_key => {
+                        // Check if the message context is suitable for this waitable, which allows implementing guards on the correlation key.
+                        if !context.is_suitable_for(&expected_sender) {
+                            continue;
+                        }
                         if let Some(message) = messages.receive::<E>(correlation_key) {
                             return message;
                         }
                     }
                     Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        panic!("message channel closed before expected message arrived")
-                    }
-                }
-            }
-        })
-    }
-}
-
-impl<P: Process, E: Value> Waitable<P, GuardedCorrelationKey, E> for IncomingMessage<P, E> {
-    type Future = futures::future::BoxFuture<'static, E>;
-
-    fn name(&self) -> &str {
-        &self.1
-    }
-
-    fn wait_for<S: Storage>(
-        &self,
-        _token: &Token<S>,
-        guarded_correlation_key: GuardedCorrelationKey,
-    ) -> Self::Future {
-        let messages = self
-            .2
-            .clone()
-            .expect("incoming message waitaxble must be bound to a runtime");
-
-        let mut receiver = messages.subscribe();
-        if let Some(message) = messages.receive::<E>(guarded_correlation_key.key) {
-            return Box::pin(async move { message });
-        }
-
-        Box::pin(async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(MessageMetaData {
-                        correlation_key,
-                        context,
-                    }) if correlation_key == guarded_correlation_key.key
-                        && context.is_suitable_for(&guarded_correlation_key.expected_sender) =>
-                    {
-                        if let Some(message) = messages.receive::<E>(correlation_key) {
-                            return message;
-                        }
-                    }
-                    Ok(MessageMetaData {
-                        correlation_key,
-                        context: _,
-                    }) if correlation_key == guarded_correlation_key.key => {
-                        // Message with matching key but unsuitable sender, ignore.
-                    }
-                    Ok(_) => {
-                        // Message not relevant for this waitable, ignore.
-                    }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         panic!("message channel closed before expected message arrived")
