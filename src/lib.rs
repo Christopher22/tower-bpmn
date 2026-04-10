@@ -14,7 +14,6 @@
 #![allow(private_bounds)]
 
 // Tower-native runtime API service and OpenAPI generation.
-// pub mod api;
 mod api;
 mod bpmn;
 /// Executor backends for running asynchronous process tasks.

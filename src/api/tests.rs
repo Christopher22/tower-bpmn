@@ -94,11 +94,11 @@ fn post(path: &str, body: serde_json::Value) -> Request<Full<bytes::Bytes>> {
         .unwrap()
 }
 
-fn post_raw(path: &str, body: &str, content_type: &str) -> Request<Full<bytes::Bytes>> {
+fn post_raw(path: &str, body: &str) -> Request<Full<bytes::Bytes>> {
     Request::builder()
         .method(Method::POST)
         .uri(path)
-        .header("content-type", content_type)
+        .header("content-type", "application/json")
         .body(Full::new(bytes::Bytes::from(body.to_string())))
         .unwrap()
 }
@@ -118,249 +118,237 @@ where
     (status, value)
 }
 
-async fn openapi_doc(api: &mut Api<TokioExecutor, InMemory>) -> serde_json::Value {
-    let (status, body) = call_json(api, get("/api/")).await;
-    assert_eq!(status, StatusCode::OK);
-    body
-}
-
-fn has_status(status_value: &serde_json::Value, expected: &str) -> bool {
-    match status_value {
-        serde_json::Value::String(value) => value.eq_ignore_ascii_case(expected),
-        serde_json::Value::Object(value) => {
-            value.keys().any(|key| key.eq_ignore_ascii_case(expected))
-        }
-        _ => false,
-    }
-}
-
-fn instance_matches_status(
-    instance: &serde_json::Value,
-    instance_id: &str,
-    expected: &str,
-) -> bool {
-    instance["id"] == instance_id && has_status(&instance["status"], expected)
-}
-
-async fn wait_for_instance_status(
-    api: &mut Api<TokioExecutor, InMemory>,
-    process_name: &str,
-    instance_id: &str,
-    expected: &str,
-) -> bool {
-    for _ in 0..50 {
-        let (status, body) =
-            call_json(api, get(&format!("/processes/{process_name}/instances"))).await;
-        if status == StatusCode::OK
-            && body["instances"].as_array().is_some_and(|instances| {
-                instances
-                    .iter()
-                    .any(|instance| instance_matches_status(instance, instance_id, expected))
-            })
-        {
-            return true;
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-
-    false
+fn instance_has_status(body: &serde_json::Value, instance_id: &str, status: &str) -> bool {
+    body["instances"].as_array().is_some_and(|instances| {
+        instances.iter().any(|instance| {
+            instance["id"] == instance_id
+                && match &instance["status"] {
+                    serde_json::Value::String(value) => value.eq_ignore_ascii_case(status),
+                    serde_json::Value::Object(value) => {
+                        value.keys().any(|key| key.eq_ignore_ascii_case(status))
+                    }
+                    _ => false,
+                }
+        })
+    })
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn openapi_root_is_available() {
+async fn openapi_is_available_at_root_and_entrypoint() {
     let mut api = build_api();
-    let body = openapi_doc(&mut api).await;
 
-    assert_eq!(body["openapi"], "3.1.0");
-    assert!(body["paths"]["/processes"].is_object());
-    assert!(body["components"]["schemas"]["StartInstanceResponse"].is_object());
-    assert!(body["components"]["schemas"]["Instances"].is_object());
-    assert!(body["components"]["schemas"]["Instance"].is_object());
-    assert!(body["components"]["schemas"]["AcceptedResponse"].is_object());
-    assert!(body["components"]["schemas"]["ProcessMetadataResponse"].is_object());
+    let (status_root, body_root) = call_json(&mut api, get("/")).await;
+    assert_eq!(status_root, StatusCode::OK);
+    assert_eq!(body_root["openapi"], "3.1.0");
+
+    let (status_entry, body_entry) = call_json(&mut api, get("/api/")).await;
+    assert_eq!(status_entry, StatusCode::OK);
+    assert_eq!(body_entry["info"]["title"], "axum-bpmn API");
+    assert!(body_entry["paths"]["/processes"].is_object());
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn openapi_lists_registered_process_paths_and_input_schemas() {
+async fn openapi_lists_process_paths_and_raw_input_schemas() {
     let mut api = build_api();
-    let body = openapi_doc(&mut api).await;
+    let (_, body) = call_json(&mut api, get("/api")).await;
 
+    assert!(body["paths"]["/processes/start-process-1"].is_object());
     assert!(body["paths"]["/processes/start-process-1/instances"].is_object());
-    assert!(body["paths"]["/processes/wait-process-1/instances"].is_object());
-    assert!(body["paths"]["/processes/message-target-1/messages"].is_object());
-    assert!(body["paths"]["/processes/start-process-1/"].is_object());
+    assert!(body["paths"]["/processes/wait-process-1"].is_object());
 
-    let start_input_schema = &body["paths"]["/processes/start-process-1/instances"]["post"]["requestBody"]
-        ["content"]["application/json"]["schema"]["properties"]["input"];
-    assert_eq!(start_input_schema["type"], "integer");
+    let start_schema = &body["paths"]["/processes/start-process-1"]["post"]["requestBody"]["content"]
+        ["application/json"]["schema"];
+    assert_eq!(start_schema["type"], "integer");
 
-    let wait_input_schema = &body["paths"]["/processes/wait-process-1/instances"]["post"]["requestBody"]
-        ["content"]["application/json"]["schema"]["properties"]["input"];
-    assert_eq!(wait_input_schema["type"], "string");
-    assert_eq!(wait_input_schema["format"], "uuid");
+    let wait_schema = &body["paths"]["/processes/wait-process-1"]["post"]["requestBody"]["content"]
+        ["application/json"]["schema"];
+    assert_eq!(wait_schema["type"], "string");
+    assert_eq!(wait_schema["format"], "uuid");
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn openapi_uses_exact_response_struct_refs() {
+async fn openapi_exposes_expected_component_schemas() {
     let mut api = build_api();
-    let body = openapi_doc(&mut api).await;
+    let (_, body) = call_json(&mut api, get("/")).await;
 
-    assert_eq!(
-        body["paths"]["/processes/start-process-1/instances"]["post"]["responses"]["202"]["content"]
-            ["application/json"]["schema"]["$ref"],
-        "#/components/schemas/StartInstanceResponse"
-    );
-    assert_eq!(
-        body["paths"]["/processes/start-process-1/instances"]["get"]["responses"]["200"]["content"]
-            ["application/json"]["schema"]["$ref"],
-        "#/components/schemas/Instances"
-    );
-    assert_eq!(
-        body["paths"]["/processes/message-target-1/messages"]["post"]["responses"]["202"]["content"]
-            ["application/json"]["schema"]["$ref"],
-        "#/components/schemas/AcceptedResponse"
-    );
-    assert_eq!(
-        body["paths"]["/processes/start-process-1/"]["get"]["responses"]["200"]["content"]["application/json"]
-            ["schema"]["$ref"],
-        "#/components/schemas/ProcessMetadataResponse"
-    );
+    assert!(body["components"]["schemas"]["Error"].is_object());
+    assert!(body["components"]["schemas"]["ProcessesResponse"].is_object());
+    assert!(body["components"]["schemas"]["ProcessSummary"].is_object());
+    assert!(body["components"]["schemas"]["StartedInstanceResponse"].is_object());
+    assert!(body["components"]["schemas"]["Instances"].is_object());
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn lists_registered_processes() {
+async fn lists_registered_processes_with_metadata_steps_and_input_schema() {
     let mut api = build_api();
-    let (status, body) = call_json(&mut api, get("/processes")).await;
+    let (status, body) = call_json(&mut api, get("/api/processes")).await;
 
     assert_eq!(status, StatusCode::OK);
-    let names = body["processes"].as_array().unwrap();
-    assert!(names.iter().any(|name| name == "start-process-1"));
-    assert!(names.iter().any(|name| name == "wait-process-1"));
-}
+    let processes = body["processes"].as_array().unwrap();
+    let start = processes
+        .iter()
+        .find(|process| process["name"] == "start-process-1")
+        .unwrap();
 
-#[tokio::test(flavor = "current_thread")]
-async fn returns_registered_process_metadata() {
-    let mut api = build_api();
-    let (status, body) = call_json(&mut api, get("/processes/start-process-1")).await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["process"]["name"], "start-process");
-    assert_eq!(body["process"]["version"], 1);
-    assert_eq!(
-        body["process"]["description"],
-        "Starts and completes immediately"
+    assert_eq!(start["metadata"]["name"], "start-process");
+    assert_eq!(start["metadata"]["version"], 1);
+    assert_eq!(start["input_schema"]["type"], "integer");
+    assert!(
+        start["steps"]
+            .as_array()
+            .is_some_and(|steps| steps.iter().any(|step| step == "identity"))
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn returns_not_found_for_unknown_process_metadata() {
+async fn process_instance_routes_start_instances_on_both_aliases() {
     let mut api = build_api();
-    let (status, body) = call_json(&mut api, get("/processes/unknown-process-1")).await;
 
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"], "unknown process");
+    let (status_direct, body_direct) = call_json(
+        &mut api,
+        post("/processes/start-process-1", serde_json::json!(12)),
+    )
+    .await;
+    assert_eq!(status_direct, StatusCode::ACCEPTED);
+    assert!(body_direct["id"].is_string());
+    assert_eq!(body_direct["status"], "running");
+
+    let (status_instances, body_instances) = call_json(
+        &mut api,
+        post(
+            "/processes/start-process-1/instances",
+            serde_json::json!(21),
+        ),
+    )
+    .await;
+    assert_eq!(status_instances, StatusCode::ACCEPTED);
+    assert!(body_instances["id"].is_string());
+    assert_eq!(body_instances["status"], "running");
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn starts_new_process_instances() {
-    let mut api = build_api();
-    let request = post(
-        "/processes/start-process-1/instances",
-        serde_json::json!({ "input": 12 }),
-    );
-    let (status, body) = call_json(&mut api, request).await;
-
-    assert_eq!(status, StatusCode::ACCEPTED);
-    assert!(body["instance_id"].is_string());
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn lists_running_instances_and_can_read_instance_state() {
+async fn process_instance_routes_list_running_instances_on_both_aliases() {
     let mut api = build_api();
     let correlation_key = CorrelationKey::new();
-
-    let (start_status, start_body) = call_json(
+    let (_, started) = call_json(
         &mut api,
         post(
-            "/processes/wait-process-1/instances",
-            serde_json::json!({ "input": correlation_key }),
+            "/api/processes/wait-process-1/instances",
+            serde_json::to_value(correlation_key).unwrap(),
         ),
     )
     .await;
+    let instance_id = started["id"].as_str().unwrap().to_string();
 
-    assert_eq!(start_status, StatusCode::ACCEPTED);
-    let instance_id = start_body["instance_id"].as_str().unwrap().to_string();
+    let (status_direct, direct_body) = call_json(&mut api, get("/processes/wait-process-1")).await;
+    assert_eq!(status_direct, StatusCode::OK);
+    assert!(instance_has_status(&direct_body, &instance_id, "running"));
 
-    let (list_status, list_body) =
+    let (status_instances, instances_body) =
         call_json(&mut api, get("/processes/wait-process-1/instances")).await;
-    assert_eq!(list_status, StatusCode::OK);
-    let instances = list_body["instances"].as_array().unwrap();
-    assert!(instances.iter().any(|instance| instance_matches_status(
-        instance,
+    assert_eq!(status_instances, StatusCode::OK);
+    assert!(instance_has_status(
+        &instances_body,
         &instance_id,
         "running"
-    )));
-    assert!(wait_for_instance_status(&mut api, "wait-process-1", &instance_id, "running").await);
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn rejects_invalid_json_payloads() {
+async fn returns_empty_instance_list_before_any_start() {
     let mut api = build_api();
+    let (status, body) = call_json(&mut api, get("/processes/start-process-1/instances")).await;
 
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["instances"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rejects_invalid_json_body_syntax() {
+    let mut api = build_api();
     let (status, body) = call_json(
         &mut api,
-        post_raw(
-            "/processes/start-process-1/instances",
-            "{\"input\": 42",
-            "application/json",
-        ),
+        post_raw("/processes/start-process-1/instances", "{\"broken\":"),
     )
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["status"], 400);
     assert!(
-        body["error"]
+        body["message"]
             .as_str()
-            .is_some_and(|msg| msg.contains("invalid JSON body"))
+            .is_some_and(|message| message.contains("invalid JSON body"))
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn rejects_invalid_start_instance_payload_shape() {
+async fn rejects_payloads_that_do_not_match_process_input_schema() {
     let mut api = build_api();
-
     let (status, body) = call_json(
         &mut api,
         post(
             "/processes/start-process-1/instances",
-            serde_json::json!({ "input": "not-an-integer" }),
+            serde_json::json!("not-an-integer"),
         ),
     )
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["status"], 400);
     assert!(
-        body["error"]
+        body["message"]
             .as_str()
-            .is_some_and(|msg| msg.contains("invalid input"))
+            .is_some_and(|message| message.contains("invalid input"))
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn returns_not_found_for_unknown_process_instances_route() {
+async fn unknown_routes_and_processes_return_not_found() {
     let mut api = build_api();
-    let (status, body) = call_json(&mut api, get("/processes/unknown-process-1/instances")).await;
 
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"], "unknown process");
+    let (status_unknown_route, body_unknown_route) =
+        call_json(&mut api, get("/api/unknown-route")).await;
+    assert_eq!(status_unknown_route, StatusCode::NOT_FOUND);
+    assert_eq!(body_unknown_route["status"], 404);
+    assert_eq!(body_unknown_route["message"], "route not found");
+
+    let (status_unknown_process, body_unknown_process) =
+        call_json(&mut api, get("/processes/unknown-process-1/instances")).await;
+    assert_eq!(status_unknown_process, StatusCode::NOT_FOUND);
+    assert_eq!(body_unknown_process["message"], "route not found");
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn unknown_routes_return_not_found() {
+async fn unsupported_methods_return_method_not_allowed() {
     let mut api = build_api();
-    let (status, body) = call_json(&mut api, get("/unknown-route")).await;
 
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"], "route not found");
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/processes")
+        .body(Full::new(bytes::Bytes::from("1")))
+        .unwrap();
+    let (status_post, body_post) = call_json(&mut api, request).await;
+    assert_eq!(status_post, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(body_post["message"], "method not allowed");
+
+    let request = Request::builder()
+        .method(Method::PUT)
+        .uri("/processes/start-process-1")
+        .body(Full::new(bytes::Bytes::new()))
+        .unwrap();
+    let (status_put, body_put) = call_json(&mut api, request).await;
+    assert_eq!(status_put, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(body_put["status"], 405);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn trailing_slashes_are_accepted() {
+    let mut api = build_api();
+
+    let (status_processes, _) = call_json(&mut api, get("/api/processes/")).await;
+    assert_eq!(status_processes, StatusCode::OK);
+
+    let (status_instances, _) =
+        call_json(&mut api, get("/api/processes/start-process-1/instances/")).await;
+    assert_eq!(status_instances, StatusCode::OK);
 }

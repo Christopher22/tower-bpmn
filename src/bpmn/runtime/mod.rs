@@ -116,7 +116,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
             Ok(spawned_process) => spawned_process,
             Err(MessageError::NoTarget) => Err(InstanceSpawnError::Unregistered),
             Err(error) => {
-                panic!("Unexpected error while starting process: {}", error)
+                panic!("Unexpected error while starting process: {error}")
             }
         }
     }
