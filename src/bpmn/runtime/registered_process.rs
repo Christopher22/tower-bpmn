@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::{
     BpmnStep, ExtendedExecutor, MetaData, Process, ProcessBuilder, ProcessError, ProcessName,
-    State, Steps, StorageBackend, Token, Value,
+    State, Step, Steps, StorageBackend, Token, Value,
     bpmn::runtime::DynamicInput,
     petri_net::{FirstCompetingStrategy, Id, PetriNet, Place, Simulation},
 };
@@ -87,6 +87,32 @@ impl<B: StorageBackend> RegisteredProcess<B> {
             simulation[entry.0] = State::Completed(entry.1);
         }
         simulation
+    }
+
+    /// Resolve the place reached after completing the given step.
+    ///
+    /// This is used by storage backends to reconstruct a resumable marking from
+    /// persisted token history.
+    pub(crate) fn place_after_step(
+        &self,
+        step: &Step,
+    ) -> Option<Id<Place<State<B::Storage>>>> {
+        self.petri_net
+            .transitions()
+            .find_map(|transition| {
+                let matches_step = match &transition.action {
+                    BpmnStep::Task(name, _) => name == step,
+                    BpmnStep::Waitable(name, _) => name == step,
+                    BpmnStep::XorBranch(name, _) => name == step,
+                    BpmnStep::And(_) => false,
+                };
+
+                if !matches_step {
+                    return None;
+                }
+
+                transition.output.first().map(|arc| arc.target)
+            })
     }
 }
 

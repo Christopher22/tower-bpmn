@@ -1,4 +1,5 @@
 mod in_memory;
+mod sqlite;
 
 use crate::{
     InstanceId, ProcessName, RegisteredProcess, State, Step, Token, TokenId, Value,
@@ -6,6 +7,7 @@ use crate::{
 };
 
 pub use self::in_memory::{InMemory, InMemoryStorage};
+pub use self::sqlite::{Sqlite, SqliteError, SqliteStorage};
 
 /// A backend suitable for storing the data of instances.
 pub trait StorageBackend: 'static + Clone + Sized + Send + Sync {

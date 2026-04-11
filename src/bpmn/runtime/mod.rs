@@ -18,7 +18,8 @@ pub use instance::{Handle, Instance, InstanceId, InstanceNotRunning, InstanceSta
 pub use instances::{InstanceSpawnError, Instances};
 pub use registered_process::RegisteredProcess;
 pub use storage::{
-    InMemory, InMemoryStorage, ResumableProcess, ResumeError, Storage, StorageBackend,
+    InMemory, InMemoryStorage, ResumableProcess, ResumeError, Sqlite, SqliteError, SqliteStorage,
+    Storage, StorageBackend,
 };
 pub use token::{Token, TokenId, Value};
 
