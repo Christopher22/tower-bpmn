@@ -139,7 +139,7 @@ mod tests {
     fn test_suitability_edge_cases() {
         let chef = Participant::role("Chef");
         let waiter = Participant::role("Waiter");
-        let ctx = make_context(&[chef.clone()]);
+        let ctx = make_context(std::slice::from_ref(&chef));
 
         // 1. Participant::Everyone: Always returns true regardless of context content
         assert!(
