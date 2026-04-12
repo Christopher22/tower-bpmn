@@ -4,11 +4,9 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{
-    InstanceId, ProcessName, RegisteredProcess, ResumableProcess, ResumeError, Step, Storage,
-    StorageBackend, TokenId, Value,
-};
-use crate::Steps;
+use super::super::super::{ProcessName, Step, Steps};
+use super::super::{InstanceId, RegisteredProcess, Token, TokenId, Value};
+use super::{ResumableProcess, ResumeError, Storage, StorageBackend};
 
 /// Errors emitted while opening or preparing SQLite storage.
 #[derive(Debug)]
@@ -307,7 +305,7 @@ impl StorageBackend for Sqlite {
                 continue;
             };
 
-            let token = crate::Token::new(storage.clone());
+            let token = Token::new(storage.clone());
             storage.assign_resumed_slot(token.id(), token_slot);
             current_state.push((place_id, token));
         }
@@ -679,8 +677,8 @@ mod tests {
         thread,
     };
 
+    use crate::bpmn::{MetaData, Process, ProcessBuilder, Runtime, gateways};
     use crate::executor::TokioExecutor;
-    use crate::{MetaData, Process, ProcessBuilder, Runtime, gateways};
 
     use super::*;
 
@@ -738,7 +736,7 @@ mod tests {
     fn sqlite_storage_roundtrip_for_values_and_steps() {
         let steps = Steps::new(["a", "b"].into_iter()).expect("test steps must be valid");
         let storage = SqliteStorage::for_test();
-        let root = crate::Token::new(storage.clone())
+        let root = Token::new(storage.clone())
             .set_output(steps.start(), 11_i32)
             .set_output(steps.get("a").expect("step a exists"), 22_i32)
             .set_output(steps.get("b").expect("step b exists"), 33_i32);
@@ -827,7 +825,7 @@ mod tests {
             .steps
             .get("identity")
             .expect("identity step must exist");
-        let token_id = crate::Token::new(storage.clone()).id();
+        let token_id = Token::new(storage.clone()).id();
         storage.add(token_id, identity, 13_i32);
 
         let (instances_count, history_count): (i64, i64) = backend.with_connection(|connection| {
@@ -870,7 +868,7 @@ mod tests {
             .steps
             .get("identity")
             .expect("identity step must exist");
-        let token_id = crate::Token::new(storage.clone()).id();
+        let token_id = Token::new(storage.clone()).id();
 
         storage.add(token_id, identity, 7_i32);
 
@@ -905,7 +903,7 @@ mod tests {
             .steps
             .get("identity")
             .expect("identity step must exist");
-        let token_id = crate::Token::new(storage.clone()).id();
+        let token_id = Token::new(storage.clone()).id();
         storage.add(token_id, identity.clone(), 42_i32);
 
         let resumable = backend
@@ -949,7 +947,7 @@ mod tests {
             .get("right")
             .expect("right step must exist");
 
-        let seed = crate::Token::new(storage.clone());
+        let seed = Token::new(storage.clone());
         let left = seed.fork().set_output(left_step.clone(), 11_i32);
         let right = seed.fork().set_output(right_step.clone(), 22_i32);
 
@@ -1018,7 +1016,7 @@ mod tests {
             .steps
             .get("identity")
             .expect("identity step must exist");
-        let draft_token_id = crate::Token::new(draft_storage.clone()).id();
+        let draft_token_id = Token::new(draft_storage.clone()).id();
 
         let complex_name = ProcessName::from(SqliteComplexProcess.metadata());
         let complex = runtime
@@ -1033,7 +1031,7 @@ mod tests {
             .steps
             .get("prepare")
             .expect("prepare step must exist");
-        let complex_token_id = crate::Token::new(complex_storage.clone()).id();
+        let complex_token_id = Token::new(complex_storage.clone()).id();
 
         let start = Arc::new(Barrier::new(3));
 

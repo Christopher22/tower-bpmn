@@ -1,5 +1,5 @@
-use axum_bpmn::{
-    InMemory, IncomingMessage, Process, ProcessBuilder, Runtime, Step, Storage, Token,
+use axum_bpmn::bpmn::{
+    InMemory, IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Step, Storage, Token,
     messages::{CorrelationKey, Message},
 };
 
@@ -10,8 +10,8 @@ impl Process for MessageTarget {
     type Input = i32;
     type Output = i32;
 
-    fn metadata(&self) -> &axum_bpmn::MetaData {
-        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
             "message-target-compat",
             "A process that demonstrates message targeting.",
         );
@@ -33,8 +33,8 @@ impl Process for WaitForMessageProcess {
     type Input = CorrelationKey;
     type Output = i32;
 
-    fn metadata(&self) -> &axum_bpmn::MetaData {
-        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
             "wait-for-message-compat",
             "A process that demonstrates waiting for messages.",
         );
@@ -61,8 +61,8 @@ impl Process for ThrowMessageProcess {
     type Input = (CorrelationKey, i32);
     type Output = i32;
 
-    fn metadata(&self) -> &axum_bpmn::MetaData {
-        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
             "throw-message-compat",
             "A process that demonstrates throwing messages.",
         );
@@ -92,8 +92,8 @@ impl Process for ParallelAggregationProcess {
     type Input = i32;
     type Output = [i32; 2];
 
-    fn metadata(&self) -> &axum_bpmn::MetaData {
-        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
             "parallel-aggregation-compat",
             "A process that demonstrates parallel aggregation.",
         );
@@ -104,9 +104,9 @@ impl Process for ParallelAggregationProcess {
         &self,
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
-        let [left, right] = process.split(axum_bpmn::gateways::And("AND Split".into()));
+        let [left, right] = process.split(axum_bpmn::bpmn::gateways::And("AND Split".into()));
         ProcessBuilder::join(
-            axum_bpmn::gateways::And("Join path".into()),
+            axum_bpmn::bpmn::gateways::And("Join path".into()),
             [
                 left.then("left-path", |_token, value| value + 10),
                 right.then("right-path", |_token, value| value + 20),

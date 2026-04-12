@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use std::any::Any;
 
-use crate::{Step, Storage};
+use crate::bpmn::{Step, Storage};
 
 /// Marker trait for values that can be stored in token history and messages.
 pub trait Value:
@@ -117,7 +117,7 @@ impl<S: Clone> Clone for Token<S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{InMemoryStorage, Steps};
+    use crate::bpmn::{InMemoryStorage, Steps};
 
     use super::*;
 

@@ -5,7 +5,7 @@ use dashmap::DashMap;
 use std::{any::Any, sync::Arc};
 use tokio::sync::broadcast::{Receiver, Sender};
 
-use crate::{
+use super::{
     DynamicInput, DynamicValue, ExtendedExecutor, InstanceId, InstanceSpawnError, Instances,
     MetaData, Process, ProcessName, Step, StorageBackend, Value,
 };

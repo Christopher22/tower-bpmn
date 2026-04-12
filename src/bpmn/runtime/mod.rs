@@ -8,10 +8,8 @@ mod token;
 use serde_json::Value as JsonValue;
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{
-    ExtendedExecutor, Process, ProcessBuilder, ProcessName,
-    messages::{Context, Message, MessageBroker, MessageError},
-};
+use super::messages::{Context, Message, MessageBroker, MessageError};
+use super::{ExtendedExecutor, Process, ProcessBuilder, ProcessName};
 
 pub use dynamic::{DynamicInput, DynamicValue};
 pub use instance::{Handle, Instance, InstanceId, InstanceNotRunning, InstanceStatus};
@@ -136,8 +134,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
     ) -> Result<InstanceId, InstanceSpawnError> {
         let mut message = Message::for_dynamic_starting(process_name, input);
         message.context = context;
-        match self.messages.send(message)
-        {
+        match self.messages.send(message) {
             Ok(spawned_process) => spawned_process,
             Err(MessageError::NoTarget) => Err(InstanceSpawnError::Unregistered),
             Err(error) => {

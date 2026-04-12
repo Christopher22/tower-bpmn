@@ -2,12 +2,12 @@ use std::{any::TypeId, sync::Arc};
 
 use serde::Serialize;
 
-use crate::{
+use super::super::{
     BpmnStep, ExtendedExecutor, MetaData, Process, ProcessBuilder, ProcessError, ProcessName,
     State, Step, Steps, StorageBackend, Token, Value,
-    bpmn::runtime::DynamicInput,
-    petri_net::{FirstCompetingStrategy, Id, PetriNet, Place, Simulation},
 };
+use super::DynamicInput;
+use crate::petri_net::{FirstCompetingStrategy, Id, PetriNet, Place, Simulation};
 
 type PetriNetRef<S> = Arc<PetriNet<BpmnStep<S>, State<S>>>;
 
@@ -93,26 +93,21 @@ impl<B: StorageBackend> RegisteredProcess<B> {
     ///
     /// This is used by storage backends to reconstruct a resumable marking from
     /// persisted token history.
-    pub(crate) fn place_after_step(
-        &self,
-        step: &Step,
-    ) -> Option<Id<Place<State<B::Storage>>>> {
-        self.petri_net
-            .transitions()
-            .find_map(|transition| {
-                let matches_step = match &transition.action {
-                    BpmnStep::Task(name, _) => name == step,
-                    BpmnStep::Waitable(name, _) => name == step,
-                    BpmnStep::XorBranch(name, _) => name == step,
-                    BpmnStep::And(_) => false,
-                };
+    pub(crate) fn place_after_step(&self, step: &Step) -> Option<Id<Place<State<B::Storage>>>> {
+        self.petri_net.transitions().find_map(|transition| {
+            let matches_step = match &transition.action {
+                BpmnStep::Task(name, _) => name == step,
+                BpmnStep::Waitable(name, _) => name == step,
+                BpmnStep::XorBranch(name, _) => name == step,
+                BpmnStep::And(_) => false,
+            };
 
-                if !matches_step {
-                    return None;
-                }
+            if !matches_step {
+                return None;
+            }
 
-                transition.output.first().map(|arc| arc.target)
-            })
+            transition.output.first().map(|arc| arc.target)
+        })
     }
 }
 

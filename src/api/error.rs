@@ -2,7 +2,7 @@ use http::{Response, StatusCode};
 use serde::{Serialize, ser::SerializeStruct};
 
 use super::json_response;
-use crate::{InstanceSpawnError, InvalidProcessNameError, messages::MessageError};
+use crate::bpmn::{InstanceSpawnError, InvalidProcessNameError, messages::MessageError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {

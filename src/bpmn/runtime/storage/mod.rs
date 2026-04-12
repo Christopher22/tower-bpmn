@@ -1,10 +1,9 @@
 mod in_memory;
 mod sqlite;
 
-use crate::{
-    InstanceId, ProcessName, RegisteredProcess, State, Step, Token, TokenId, Value,
-    petri_net::{Id, Place},
-};
+use super::super::{ProcessName, State, Step};
+use super::{InstanceId, RegisteredProcess, Token, TokenId, Value};
+use crate::petri_net::{Id, Place};
 
 pub use self::in_memory::{InMemory, InMemoryStorage};
 pub use self::sqlite::{Sqlite, SqliteError, SqliteStorage};

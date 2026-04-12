@@ -1,6 +1,6 @@
 use http::request::Parts;
 
-use crate::messages::Context;
+use crate::bpmn::messages::Context;
 
 /// OpenAPI security scheme configuration provided by a guard.
 #[derive(Debug, Clone)]

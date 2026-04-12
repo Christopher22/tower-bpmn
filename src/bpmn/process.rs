@@ -1,8 +1,6 @@
 use std::borrow::Cow;
 
-use crate::Storage;
-
-use super::{ProcessBuilder, Value, messages::Participant};
+use super::{ProcessBuilder, Storage, Value, messages::Participant};
 
 /// A BPMN process definition.
 pub trait Process: 'static + Clone + Sized + Send + Sync {

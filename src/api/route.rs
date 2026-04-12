@@ -14,9 +14,9 @@ use super::{
     json_response,
     openapi::{OpenApiOperationData, OpenApiPathData, OpenApiResponseData, OpenApiRouteData},
 };
-use crate::{
-    ExtendedExecutor, InstanceId, MetaData, ProcessName, Step, StorageBackend,
-    bpmn::Runtime,
+use crate::bpmn::{
+    ExtendedExecutor, Instance, InstanceId, Instances, MetaData, ProcessName, RegisteredProcess,
+    Runtime, Step, StorageBackend,
     messages::{Context, Participant},
 };
 
@@ -635,7 +635,7 @@ fn register_process_instance_routes<E: ExtendedExecutor<B::Storage>, B: StorageB
                         StatusCode::OK,
                         ResponseDoc::new(
                             "Process instances",
-                            SchemaDoc::component::<crate::Instances<E, B>>("Instances"),
+                            SchemaDoc::component::<Instances<E, B>>("Instances"),
                         ),
                     ),
                     (
@@ -797,14 +797,8 @@ fn register_shared_components<E: ExtendedExecutor<B::Storage>, B: StorageBackend
         "StartedInstanceResponse".to_string(),
         schema_for::<StartedInstanceResponse>(),
     );
-    components.insert(
-        "Instances".to_string(),
-        schema_for::<crate::Instances<E, B>>(),
-    );
-    components.insert(
-        "Instance".to_string(),
-        schema_for::<crate::Instance<E, B>>(),
-    );
+    components.insert("Instances".to_string(), schema_for::<Instances<E, B>>());
+    components.insert("Instance".to_string(), schema_for::<Instance<E, B>>());
 }
 
 /// Response body for the process collection endpoint.
@@ -823,7 +817,7 @@ pub(super) struct ProcessSummary {
 }
 
 impl ProcessSummary {
-    fn from_registered<B: StorageBackend>(process: &crate::RegisteredProcess<B>) -> Self {
+    fn from_registered<B: StorageBackend>(process: &RegisteredProcess<B>) -> Self {
         Self {
             name: ProcessName::from(&process.meta_data),
             metadata: process.meta_data.clone(),

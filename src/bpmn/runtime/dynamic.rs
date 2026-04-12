@@ -1,4 +1,4 @@
-use crate::{Process, Value, messages::Participant};
+use super::super::{Process, Value, messages::Participant};
 
 /// A value which is stored on the heap.
 #[derive(Debug)]

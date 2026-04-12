@@ -15,10 +15,10 @@
 
 // Tower-native runtime API service and OpenAPI generation.
 mod api;
-mod bpmn;
+/// Fundamental BPMN concepts and traits for defining processes and tasks.
+pub mod bpmn;
 /// Executor backends for running asynchronous process tasks.
 pub mod executor;
 pub(crate) mod petri_net;
 
 pub use api::{Api, EverybodyGuard, Guard, OpenApiSecurityScheme};
-pub use bpmn::*;

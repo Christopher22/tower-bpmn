@@ -1,5 +1,5 @@
-use axum_bpmn::{
-    InMemory, IncomingMessage, Process, ProcessBuilder, Runtime, Step, Storage, Token,
+use axum_bpmn::bpmn::{
+    InMemory, IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Step, Storage, Token,
     messages::{Context, CorrelationKey, Message},
 };
 use std::time::Duration;
@@ -15,8 +15,8 @@ impl Process for MessageTarget {
     type Input = i32;
     type Output = i32;
 
-    fn metadata(&self) -> &axum_bpmn::MetaData {
-        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
             "message-target-compat",
             "A process that demonstrates message targeting.",
         );
@@ -38,8 +38,8 @@ impl Process for WaitForMessageProcess {
     type Input = CorrelationKey;
     type Output = i32;
 
-    fn metadata(&self) -> &axum_bpmn::MetaData {
-        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
             "wait-for-message-compat",
             "A process that demonstrates waiting for messages.",
         );
@@ -66,8 +66,8 @@ impl Process for ThrowMessageProcess {
     type Input = (CorrelationKey, i32);
     type Output = i32;
 
-    fn metadata(&self) -> &axum_bpmn::MetaData {
-        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
             "throw-message-compat",
             "A process that demonstrates throwing messages.",
         );
@@ -97,8 +97,8 @@ impl Process for ParallelAggregationProcess {
     type Input = i32;
     type Output = [i32; 2];
 
-    fn metadata(&self) -> &axum_bpmn::MetaData {
-        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
             "parallel-aggregation-compat",
             "A process that demonstrates parallel aggregation.",
         );
@@ -109,9 +109,9 @@ impl Process for ParallelAggregationProcess {
         &self,
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
-        let [left, right] = process.split(axum_bpmn::gateways::And("AND Split".into()));
+        let [left, right] = process.split(axum_bpmn::bpmn::gateways::And("AND Split".into()));
         ProcessBuilder::join(
-            axum_bpmn::gateways::And("Join path".into()),
+            axum_bpmn::bpmn::gateways::And("Join path".into()),
             [
                 left.then("left-path", |_token, value| value + 10),
                 right.then("right-path", |_token, value| value + 20),
@@ -129,8 +129,8 @@ impl Process for SimpleSequentialProcess {
     type Input = i32;
     type Output = i32;
 
-    fn metadata(&self) -> &axum_bpmn::MetaData {
-        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
             "simple-sequential",
             "A standard multi-step sequential process.",
         );
@@ -155,8 +155,8 @@ impl Process for TypeConversionProcess {
     type Input = i32;
     type Output = String;
 
-    fn metadata(&self) -> &axum_bpmn::MetaData {
-        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
             "type-conversion",
             "Demonstrates type transitions across sequence flows.",
         );
@@ -182,8 +182,8 @@ impl Process for ExclusiveGatewayProcess {
     type Input = i32;
     type Output = String;
 
-    fn metadata(&self) -> &axum_bpmn::MetaData {
-        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
             "exclusive-gateway-process",
             "Tests XOR conditional routing logic.",
         );
@@ -195,7 +195,7 @@ impl Process for ExclusiveGatewayProcess {
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
         // Assuming a standard conditional API for the Exclusive gateway
-        let [high_path, low_path] = process.split(axum_bpmn::gateways::Xor::for_splitting(
+        let [high_path, low_path] = process.split(axum_bpmn::bpmn::gateways::Xor::for_splitting(
             "Check size",
             |_, v| match v {
                 ..=100 => 1,
@@ -204,7 +204,7 @@ impl Process for ExclusiveGatewayProcess {
         ));
 
         ProcessBuilder::join(
-            axum_bpmn::gateways::Xor::for_joining("Estimate result result"),
+            axum_bpmn::bpmn::gateways::Xor::for_joining("Estimate result result"),
             [
                 high_path.then("high-path", |_token, _| "HIGH".to_string()),
                 low_path.then("low-path", |_token, _| "LOW".to_string()),
@@ -220,8 +220,8 @@ impl Process for NestedGatewayProcess {
     type Input = i32;
     type Output = i32;
 
-    fn metadata(&self) -> &axum_bpmn::MetaData {
-        static META: axum_bpmn::MetaData = axum_bpmn::MetaData::new(
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new(
             "nested-gateway-process",
             "Tests AND gateway inside another AND gateway.",
         );
@@ -232,13 +232,14 @@ impl Process for NestedGatewayProcess {
         &self,
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
-        let [outer_left, outer_right] = process.split(axum_bpmn::gateways::And("Outer AND".into()));
+        let [outer_left, outer_right] =
+            process.split(axum_bpmn::bpmn::gateways::And("Outer AND".into()));
 
         // Nesting an AND gateway inside the left branch
         let [inner_left, inner_right] =
-            outer_left.split(axum_bpmn::gateways::And("Inner AND".into()));
+            outer_left.split(axum_bpmn::bpmn::gateways::And("Inner AND".into()));
         let inner_join = ProcessBuilder::join(
-            axum_bpmn::gateways::And("Inner Join".into()),
+            axum_bpmn::bpmn::gateways::And("Inner Join".into()),
             [
                 inner_left.then("inner-add-1", |_token, v| v + 1),
                 inner_right.then("inner-add-2", |_token, v| v + 2),
@@ -249,7 +250,7 @@ impl Process for NestedGatewayProcess {
         let outer_right_path = outer_right.then("outer-mul", |_token, v| v * 10);
 
         ProcessBuilder::join(
-            axum_bpmn::gateways::And("Final Join".into()),
+            axum_bpmn::bpmn::gateways::And("Final Join".into()),
             [inner_join, outer_right_path],
         )
         .then("final-sum", |_token, [inner_res, outer_res]| {

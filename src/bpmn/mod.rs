@@ -13,15 +13,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::{borrow::Cow, ops::IndexMut};
 
+use self::messages::SendableWithFixedTarget;
 use crate::executor::Executor;
-use crate::messages::SendableWithFixedTarget;
 
 pub use self::process::{InvalidProcessNameError, MetaData, Process, ProcessName};
 pub use self::runtime::{
     DynamicInput, DynamicValue, Handle, InMemory, InMemoryStorage, Instance, InstanceId,
     InstanceNotRunning, InstanceSpawnError, InstanceStatus, Instances, ProcessError,
-    RegisteredProcess, ResumableProcess, ResumeError, Runtime, Sqlite, SqliteError,
-    SqliteStorage, Storage, StorageBackend, Token, TokenId, Value,
+    RegisteredProcess, ResumableProcess, ResumeError, Runtime, Sqlite, SqliteError, SqliteStorage,
+    Storage, StorageBackend, Token, TokenId, Value,
 };
 pub use self::steps::{InvalidStep, Step, Steps, StepsBuilder, UnfinishedBuilder};
 pub use self::waitable::{Bindable, IncomingMessage, Timer, Waitable};

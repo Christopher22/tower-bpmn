@@ -1,9 +1,8 @@
 use dashmap::DashMap;
 use serde::ser::{SerializeSeq, SerializeStruct};
 
-use crate::{
-    ExtendedExecutor, Instance, InstanceId, RegisteredProcess, ResumeError, StorageBackend, Value,
-};
+use super::super::ExtendedExecutor;
+use super::{Instance, InstanceId, RegisteredProcess, ResumeError, StorageBackend, Value};
 
 /// A collection of process instances for a specific registered process definition.
 #[derive(Debug)]

@@ -3,8 +3,7 @@
 use std::{borrow::Cow, ops::DerefMut};
 
 use crate::{
-    Step, Storage,
-    bpmn::StepsBuilder,
+    bpmn::{Step, StepsBuilder, Storage},
     petri_net::{Id, PetriNet, Place},
 };
 

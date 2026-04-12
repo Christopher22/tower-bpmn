@@ -22,9 +22,9 @@ use parking_lot::RwLock;
 use serde::Serialize;
 use tower_service::Service;
 
-pub use self::guard::{EverybodyGuard, Guard, OpenApiSecurityScheme};
 use self::error::Error;
-use crate::{
+pub use self::guard::{EverybodyGuard, Guard, OpenApiSecurityScheme};
+use crate::bpmn::{
     ExtendedExecutor, Runtime, StorageBackend,
     messages::{Context as MessageContext, Participant},
 };
@@ -148,7 +148,11 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend, G: Guard> ApiBuilder<E,
     /// Registers a custom JSON POST endpoint.
     pub fn add_post_json<F>(mut self, path: &str, status: StatusCode, callback: F) -> Self
     where
-        F: Fn(&Runtime<E, B>, serde_json::Value, &MessageContext) -> Result<serde_json::Value, Error>
+        F: Fn(
+                &Runtime<E, B>,
+                serde_json::Value,
+                &MessageContext,
+            ) -> Result<serde_json::Value, Error>
             + Send
             + Sync
             + 'static,
@@ -166,7 +170,11 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend, G: Guard> ApiBuilder<E,
         callback: F,
     ) -> Self
     where
-        F: Fn(&Runtime<E, B>, serde_json::Value, &MessageContext) -> Result<serde_json::Value, Error>
+        F: Fn(
+                &Runtime<E, B>,
+                serde_json::Value,
+                &MessageContext,
+            ) -> Result<serde_json::Value, Error>
             + Send
             + Sync
             + 'static,
@@ -230,8 +238,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend, G: Guard> Api<E, B, G> 
         let method = parts.method;
         let raw_segments = collect_path_segments(parts.uri.path());
         let segments = strip_entry_point(&raw_segments, api_entry_point);
-        root.serve(segments, method, body, runtime, &context)
-            .await
+        root.serve(segments, method, body, runtime, &context).await
     }
 }
 
