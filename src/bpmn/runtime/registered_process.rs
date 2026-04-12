@@ -18,9 +18,6 @@ pub struct RegisteredProcess<B: StorageBackend> {
     pub meta_data: MetaData,
     /// The steps of the process.
     pub steps: Steps,
-    /// The (dynamic) types which could be used to start this process.
-    #[serde(skip)]
-    pub input: DynamicInput,
     #[serde(skip)]
     pub(crate) start: Id<Place<State<B::Storage>>>,
     #[serde(skip)]
@@ -29,6 +26,8 @@ pub struct RegisteredProcess<B: StorageBackend> {
     pub(crate) process_type: TypeId,
     #[serde(skip)]
     petri_net: PetriNetRef<B::Storage>,
+    #[serde(skip)]
+    input: DynamicInput,
 }
 
 impl<B: StorageBackend> RegisteredProcess<B> {
@@ -46,7 +45,7 @@ impl<B: StorageBackend> RegisteredProcess<B> {
             start: start_place,
             end: current_place,
             process_type: TypeId::of::<P>(),
-            input: DynamicInput::for_process::<P>(),
+            input: DynamicInput::new::<P::Input>(steps.start()),
             steps,
         }
     }
@@ -68,7 +67,7 @@ impl<B: StorageBackend> RegisteredProcess<B> {
             self.input.matches::<V>(),
             "The input type does not match the expected type for this process"
         );
-        let token = Token::new(shared_storage).set_output(self.steps.start(), input);
+        let token = Token::new(shared_storage).set_output(self.steps.start().into(), input);
         let mut simulation =
             Simulation::new(executor, self.petri_net.clone(), FirstCompetingStrategy);
         simulation[self.start] = State::Completed(token);

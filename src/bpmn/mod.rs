@@ -18,13 +18,15 @@ use crate::executor::Executor;
 
 pub use self::process::{InvalidProcessNameError, MetaData, Process, ProcessName};
 pub use self::runtime::{
-    DynamicInput, DynamicValue, Handle, InMemory, InMemoryStorage, Instance, InstanceId,
-    InstanceNotRunning, InstanceSpawnError, InstanceStatus, Instances, ProcessError,
-    RegisteredProcess, ResumableProcess, ResumeError, Runtime, Sqlite, SqliteError, SqliteStorage,
-    Storage, StorageBackend, Token, TokenId, Value,
+    DynamicValue, Handle, InMemory, InMemoryStorage, Instance, InstanceId, InstanceNotRunning,
+    InstanceSpawnError, InstanceStatus, Instances, ProcessError, RegisteredProcess,
+    ResumableProcess, ResumeError, Runtime, Sqlite, SqliteError, SqliteStorage, Storage,
+    StorageBackend, Token, TokenId, Value,
 };
-pub use self::steps::{InvalidStep, Step, Steps, StepsBuilder, UnfinishedBuilder};
-pub use self::waitable::{Bindable, IncomingMessage, Timer, Waitable};
+pub use self::steps::{
+    ExternalStep, ExternalStepData, InvalidStep, Step, Steps, StepsBuilder, UnfinishedBuilder,
+};
+pub use self::waitable::{IncomingMessage, Registerable, Timer, Waitable};
 
 /// Executor abstraction required by the BPMN runtime.
 pub trait ExtendedExecutor<S: Storage>:
@@ -223,7 +225,9 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
 
         // Add a special start step that is always enabled to kick off the process.
         let steps = StepsBuilder::default();
-        steps.add_start();
+        steps
+            .add_start::<E>(P::INITIAL_OWNER.clone())
+            .expect("start already existing");
 
         ProcessBuilder {
             meta_data,
@@ -357,9 +361,7 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
         mut self,
         mut waitable: W,
     ) -> ProcessBuilder<P, O, S> {
-        let name = self.steps.add(waitable.name()).expect("failed to add step");
-
-        waitable.bind_messages(name.clone(), &self.message_manager);
+        let step = waitable.register(&mut self.steps, &self.message_manager);
         let waitable = Arc::new(waitable);
         let generator = Box::new(move |name: Step, state: Vec<Token<S>>| {
             let waitable = waitable.clone();
@@ -381,7 +383,7 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
             future
         });
         ProcessBuilder {
-            current_place: self.add_next_place(BpmnStep::Waitable(name, generator)),
+            current_place: self.add_next_place(BpmnStep::Waitable(step, generator)),
             process: self.process,
             input_type: std::marker::PhantomData,
             petri_net: self.petri_net,

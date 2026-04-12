@@ -3,23 +3,20 @@ use std::borrow::Cow;
 use chrono::DateTime;
 
 use crate::bpmn::{
-    Process, Step, Storage, Token, Value,
+    ExternalStepData, Process, Step, StepsBuilder, Storage, Token, Value,
     messages::{CorrelationKey, MessageBroker, MessageMetaData, Messages, Participant},
 };
 
 /// Allow binding message channels to waitables, which can be used to implement message-based waiting events.
-pub trait Bindable {
+pub trait Registerable {
     /// Optional hook to inject process-scoped message channels.
-    fn bind_messages(&mut self, _step: Step, _messages: &MessageBroker) {}
+    fn register(&mut self, steps: &mut StepsBuilder, _messages: &MessageBroker) -> Step;
 }
 
 /// Asynchronous wait abstraction used for BPMN waiting events.
-pub trait Waitable<P: Process, T: Value, O: Value>: Bindable {
+pub trait Waitable<P: Process, T: Value, O: Value>: Registerable {
     /// Future returned by the wait implementation.
     type Future: Future<Output = O> + Send;
-
-    /// Human readable wait-step name written into token history.
-    fn name(&self) -> &str;
 
     /// Starts waiting for a value and resolves to the produced output.
     fn wait_for<S: Storage>(&self, token: &Token<S>, value: T) -> Self::Future;
@@ -29,14 +26,14 @@ pub trait Waitable<P: Process, T: Value, O: Value>: Bindable {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Timer(pub Cow<'static, str>);
 
-impl Bindable for Timer {}
+impl Registerable for Timer {
+    fn register(&mut self, steps: &mut StepsBuilder, _messages: &MessageBroker) -> Step {
+        steps.add(self.0.clone()).expect("invalid name")
+    }
+}
 
 impl<P: Process> Waitable<P, DateTime<chrono::Utc>, ()> for Timer {
     type Future = futures::future::Either<futures::future::Ready<()>, tokio::time::Sleep>;
-
-    fn name(&self) -> &str {
-        &self.0
-    }
 
     fn wait_for<S: Storage>(
         &self,
@@ -88,20 +85,21 @@ impl<P: Process, E: Value> IncomingMessage<P, E> {
     }
 }
 
-impl<P: Process, E: Value> Bindable for IncomingMessage<P, E> {
-    fn bind_messages(&mut self, step: Step, messages: &MessageBroker) {
+impl<P: Process, E: Value> Registerable for IncomingMessage<P, E> {
+    fn register(&mut self, steps: &mut StepsBuilder, messages: &MessageBroker) -> Step {
+        let step = steps
+            .add_external(ExternalStepData::new::<E>(self.1.clone(), self.4.clone()))
+            .expect("invalid step name");
+
         let messages = messages.get_messages_for_process(self.0.clone());
-        messages.register_input_for_step::<E>(step, self.4.clone());
+        messages.register_input_for_step::<E>(step.clone());
         self.2 = Some(messages);
+        step.into()
     }
 }
 
 impl<P: Process, E: Value> Waitable<P, CorrelationKey, E> for IncomingMessage<P, E> {
     type Future = futures::future::BoxFuture<'static, E>;
-
-    fn name(&self) -> &str {
-        &self.1
-    }
 
     fn wait_for<S: Storage>(
         &self,

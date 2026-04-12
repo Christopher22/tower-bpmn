@@ -737,7 +737,7 @@ mod tests {
         let steps = Steps::new(["a", "b"].into_iter()).expect("test steps must be valid");
         let storage = SqliteStorage::for_test();
         let root = Token::new(storage.clone())
-            .set_output(steps.start(), 11_i32)
+            .set_output(steps.start().into(), 11_i32)
             .set_output(steps.get("a").expect("step a exists"), 22_i32)
             .set_output(steps.get("b").expect("step b exists"), 33_i32);
 

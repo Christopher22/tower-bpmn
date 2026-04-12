@@ -573,11 +573,12 @@ pub(super) fn register_runtime_routes<E: ExtendedExecutor<B::Storage>, B: Storag
 
     for process in runtime.registered_processes() {
         let process_name = ProcessName::from(&process.meta_data);
+        let start_type = process.steps.start();
         register_process_instance_routes(
             routes,
             process_name,
-            process.input.responsible.clone(),
-            &process.input.json_schema,
+            start_type.as_ref().expected_participant.clone(),
+            start_type.as_ref().schema.as_value(),
         );
     }
 }
@@ -827,7 +828,7 @@ impl ProcessSummary {
                 .steps()
                 .filter_map(|step| process.steps.get(step))
                 .collect(),
-            input_schema: process.input.json_schema.clone(),
+            input_schema: process.steps.start().as_ref().schema.as_value().clone(),
         }
     }
 }

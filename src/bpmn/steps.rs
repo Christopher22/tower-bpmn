@@ -1,16 +1,57 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use schemars::JsonSchema;
+
+use crate::bpmn::{Value, messages::Participant};
+
+/// A step in a process which is waiting for external input.
+#[derive(Debug, Clone, PartialEq, JsonSchema)]
+pub struct ExternalStepData {
+    /// The name of the step.
+    pub name: String,
+    /// The expected type of the input value.
+    pub schema: schemars::Schema,
+    /// The expected sender.
+    pub expected_participant: Participant,
+    #[schemars(skip)]
+    type_id: std::any::TypeId,
+}
+
+impl ExternalStepData {
+    /// Create a new external step with the given name, schema and expected sender.
+    pub fn new<V: Value>(name: impl Into<String>, expected_participant: Participant) -> Self {
+        let mut generator = schemars::SchemaGenerator::default();
+        Self {
+            name: name.into(),
+            schema: V::json_schema(&mut generator),
+            expected_participant,
+            type_id: std::any::TypeId::of::<V>(),
+        }
+    }
+
+    /// Check if the external step expects a value of the given type.
+    pub fn matches<V: Value>(&self) -> bool {
+        self.type_id == std::any::TypeId::of::<V>()
+    }
+}
+
+impl AsRef<str> for ExternalStepData {
+    fn as_ref(&self) -> &str {
+        self.name.as_str()
+    }
+}
 
 /// A collection of steps in a process.
 #[derive(Debug, Clone)]
-pub struct Steps(Vec<Arc<String>>);
+pub struct Steps(Vec<Arc<InnerStep>>);
 
 impl Steps {
     /// Try to create a new collection of steps from a list of step names.
+    #[cfg(test)]
     pub fn new(steps: impl Iterator<Item = impl Into<String>>) -> Result<Self, InvalidStep> {
         let builder = StepsBuilder::default();
-        builder.add_start();
+        builder.add_start::<()>(Participant::Nobody)?;
         for step in steps {
             builder.add(step)?;
         }
@@ -21,36 +62,40 @@ impl Steps {
     }
 
     /// Get the start step of the process.
-    pub fn start(&self) -> Step {
-        Step(
+    pub fn start(&self) -> ExternalStep {
+        ExternalStep(Step(
             self.0
                 .first()
                 .expect("Steps must contain a start step")
                 .clone(),
-        )
+        ))
     }
 
     /// Get the end step of the process.
     pub fn end(&self) -> Step {
-        Step(
-            self.0
-                .last()
-                .expect("Steps must contain an end step")
-                .clone(),
-        )
+        self.0
+            .last()
+            .expect("Steps must contain an end step")
+            .into()
     }
 
     /// Try to get a step by name. Returns `None` if the step does not exist.
     pub fn get(&self, step: &str) -> Option<Step> {
-        self.0
-            .iter()
-            .find(|s| s.as_str() == step)
-            .map(|s| Step(s.clone()))
+        self.0.iter().find(|s| s.as_str() == step).map(Step::from)
     }
 
     /// Get an iterator over all the steps in the process.
     pub fn steps(&self) -> impl Iterator<Item = &str> {
         self.0.iter().map(|s| s.as_str())
+    }
+
+    /// Get an iterator over all the external steps in the process.
+    /// This does NOT include the start step, even though it is technically an external step.
+    pub fn external_steps(&self) -> impl Iterator<Item = &ExternalStepData> {
+        self.0.iter().filter_map(|s| match s.as_ref() {
+            InnerStep::External(external) => Some(external),
+            _ => None,
+        })
     }
 }
 
@@ -91,7 +136,7 @@ impl serde::Serialize for Steps {
 
 /// A builder for creating a collection of steps. This is used to ensure that the steps are valid and to prevent race conditions when adding steps from multiple branches.
 #[derive(Debug, Clone)]
-pub struct StepsBuilder(Arc<RwLock<Vec<Arc<String>>>>);
+pub struct StepsBuilder(Arc<RwLock<Vec<Arc<InnerStep>>>>);
 
 impl Default for StepsBuilder {
     fn default() -> Self {
@@ -102,7 +147,25 @@ impl Default for StepsBuilder {
 impl StepsBuilder {
     /// Add a step to the process. The name cannot be empty, and cannot be "Start" or "End". Returns an error if the name is invalid or already exists.
     pub fn add(&self, step: impl Into<String>) -> Result<Step, InvalidStep> {
-        let step = step.into();
+        self.add_step_internal(step.into(), InnerStep::Internal)
+    }
+
+    /// Add a step externable callable to the process. The name cannot be empty, and cannot be "Start" or "End". Returns an error if the name is invalid or already exists.
+    pub fn add_external(
+        &self,
+        external_step: ExternalStepData,
+    ) -> Result<ExternalStep, InvalidStep> {
+        Ok(ExternalStep(
+            self.add_step_internal(external_step, InnerStep::External)?,
+        ))
+    }
+
+    fn add_step_internal<V: AsRef<str>, C: FnOnce(V) -> InnerStep>(
+        &self,
+        step_owned: V,
+        callback: C,
+    ) -> Result<Step, InvalidStep> {
+        let step = step_owned.as_ref();
         if step == Step::START || step == Step::END {
             return Err(InvalidStep::Reserved);
         } else if step.trim().is_empty() {
@@ -115,7 +178,7 @@ impl StepsBuilder {
             return Err(InvalidStep::Existing);
         }
 
-        let reference = Arc::new(step);
+        let reference = Arc::new(callback(step_owned));
         lock.push(reference.clone());
         Ok(Step(reference))
     }
@@ -126,18 +189,25 @@ impl StepsBuilder {
     }
 
     /// Add a start step. This is only called internally.
-    pub(super) fn add_start(&self) -> Step {
+    pub(super) fn add_start<V: Value>(
+        &self,
+        owner: Participant,
+    ) -> Result<ExternalStep, InvalidStep> {
         let mut lock = self.0.write();
-        Step(
-            lock.iter()
-                .find(|s| s.as_str() == Step::START)
-                .cloned()
-                .unwrap_or_else(|| {
-                    let reference = Arc::new(Step::START.to_string());
-                    lock.push(reference.clone());
-                    reference
-                }),
-        )
+
+        if lock
+            .iter()
+            .any(|s| matches!(s.as_ref(), InnerStep::Start(_)))
+        {
+            return Err(InvalidStep::Existing);
+        }
+
+        let reference = Arc::new(InnerStep::Start(ExternalStepData::new::<V>(
+            Step::START,
+            owner,
+        )));
+        lock.push(reference.clone());
+        Ok(ExternalStep(Step(reference)))
     }
 
     /// Add an end step. This is only called internally.
@@ -145,10 +215,10 @@ impl StepsBuilder {
         let mut lock = self.0.write();
         Step(
             lock.iter()
-                .find(|s| s.as_str() == Step::END)
+                .find(|s| matches!(s.as_ref(), InnerStep::End))
                 .cloned()
                 .unwrap_or_else(|| {
-                    let reference = Arc::new(Step::END.to_string());
+                    let reference = Arc::new(InnerStep::End);
                     lock.push(reference.clone());
                     reference
                 }),
@@ -168,9 +238,34 @@ impl std::fmt::Display for UnfinishedBuilder {
 
 impl std::error::Error for UnfinishedBuilder {}
 
+#[derive(Debug)]
+enum InnerStep {
+    Start(ExternalStepData),
+    End,
+    Internal(String),
+    External(ExternalStepData),
+}
+
+impl InnerStep {
+    fn as_str(&self) -> &str {
+        match self {
+            InnerStep::Start(_) => Step::START,
+            InnerStep::End => Step::END,
+            InnerStep::Internal(s) => s.as_str(),
+            InnerStep::External(external) => external.name.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for InnerStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A step in a process. This equals only(!) the same step within the same process, even if the name is the same.
 #[derive(Debug, Clone)]
-pub struct Step(Arc<String>);
+pub struct Step(Arc<InnerStep>);
 
 impl Step {
     /// Reserved start name that cannot be used for user-defined steps.
@@ -181,29 +276,50 @@ impl Step {
 
     /// Check if the step is the start step.
     pub fn is_start(&self) -> bool {
-        self.0.as_str() == Self::START
+        matches!(*self.0, InnerStep::Start(_))
     }
 
     /// Check if the step is the end step.
     pub fn is_end(&self) -> bool {
-        self.0.as_str() == Self::END
+        matches!(*self.0, InnerStep::End)
     }
 
     /// Get the name of the step.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+
+    /// Get the additional data if this is an external step.
+    pub fn external_data(&self) -> Option<&ExternalStepData> {
+        match self.0.as_ref() {
+            InnerStep::Start(external) => Some(external),
+            InnerStep::External(external) => Some(external),
+            _ => None,
+        }
+    }
+}
+
+impl From<Arc<InnerStep>> for Step {
+    fn from(inner: Arc<InnerStep>) -> Self {
+        Step(inner)
+    }
+}
+
+impl<'a> From<&'a Arc<InnerStep>> for Step {
+    fn from(inner: &'a Arc<InnerStep>) -> Self {
+        Step(inner.clone())
+    }
 }
 
 impl AsRef<str> for Step {
     fn as_ref(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 impl std::fmt::Display for Step {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.0.as_str())
     }
 }
 
@@ -221,7 +337,7 @@ impl<'a> From<&'a Step> for std::borrow::Cow<'a, str> {
 
 impl From<Step> for std::borrow::Cow<'static, str> {
     fn from(step: Step) -> Self {
-        std::borrow::Cow::Owned((*step.0).clone())
+        std::borrow::Cow::Owned((*step.0).to_string())
     }
 }
 
@@ -244,11 +360,11 @@ impl serde::Serialize for Step {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.0)
+        serializer.serialize_str(self.0.as_str())
     }
 }
 
-impl schemars::JsonSchema for Step {
+impl JsonSchema for Step {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "Step".into()
     }
@@ -261,6 +377,32 @@ impl schemars::JsonSchema for Step {
         schemars::json_schema!({
             "type": "string",
         })
+    }
+}
+
+/// A step with associated ExternalStepData, guaranteed through the type system. It is easily convertible to a normal Step, but the additional data can be accessed without needing to check.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExternalStep(Step);
+
+impl From<ExternalStep> for Step {
+    fn from(external: ExternalStep) -> Self {
+        external.0
+    }
+}
+
+impl std::ops::Deref for ExternalStep {
+    type Target = Step;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<ExternalStepData> for ExternalStep {
+    fn as_ref(&self) -> &ExternalStepData {
+        self.0
+            .external_data()
+            .expect("ExternalStep must have ExternalStepData")
     }
 }
 
@@ -293,6 +435,11 @@ impl std::error::Error for InvalidStep {}
 mod tests {
     use super::*;
 
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
+    struct DummyValue {
+        value: String,
+    }
+
     #[test]
     fn test_step_equality() {
         const SAME_NAME: &str = "Task A";
@@ -301,7 +448,10 @@ mod tests {
             let step_process_1 = StepsBuilder::default();
             let step_process_2 = StepsBuilder::default();
 
-            assert_ne!(step_process_1.add_start(), step_process_2.add_start());
+            assert_ne!(
+                step_process_1.add_start::<()>(Participant::Everyone),
+                step_process_2.add_start::<()>(Participant::Everyone)
+            );
             assert_ne!(step_process_1.add_end(), step_process_2.add_end());
             assert_ne!(
                 step_process_1.add(SAME_NAME).unwrap(),
@@ -327,7 +477,7 @@ mod tests {
     #[test]
     fn test_step_diverging_builder() {
         let builder = StepsBuilder::default();
-        builder.add_start();
+        builder.add_start::<()>(Participant::Everyone).unwrap();
         builder.add_end();
         builder.add("Task A").unwrap();
 
@@ -345,7 +495,7 @@ mod tests {
     #[test]
     fn test_builder_happy_path() {
         let builder = StepsBuilder::default();
-        builder.add_start();
+        builder.add_start::<()>(Participant::Everyone).unwrap();
         builder.add_end();
         let step_a = builder
             .add("Process Data")
@@ -356,7 +506,7 @@ mod tests {
             .expect("Build should succeed with Start and End");
 
         // Verify start and end accessors
-        assert_eq!(steps.start(), *Step::START);
+        assert_eq!(Step::from(steps.start()), *Step::START);
         assert_eq!(steps.end(), *Step::END);
 
         // Verify retrieval
@@ -388,7 +538,7 @@ mod tests {
 
         // Missing End
         let builder = StepsBuilder::default();
-        builder.add_start();
+        builder.add_start::<()>(Participant::Everyone).unwrap();
         assert_eq!(builder.build().unwrap_err(), UnfinishedBuilder);
 
         // Missing Start
@@ -404,7 +554,7 @@ mod tests {
         builder.add_end();
         builder.add("Middle Task").unwrap();
         builder.add("Middle Task 2").unwrap();
-        builder.add_start();
+        builder.add_start::<()>(Participant::Everyone).unwrap();
 
         let steps = builder.build().expect("Build should succeed");
         let collected: Vec<&str> = steps.steps().collect();
@@ -417,7 +567,7 @@ mod tests {
     #[test]
     fn test_step_iterator() {
         let builder = StepsBuilder::default();
-        builder.add_start();
+        builder.add_start::<()>(Participant::Everyone).unwrap();
         builder.add("A").unwrap();
         builder.add("B").unwrap();
         builder.add_end();
@@ -433,18 +583,151 @@ mod tests {
     }
 
     #[test]
-    fn test_internal_add_is_idempotent() {
+    fn test_external_step_creation() {
+        let participant = Participant::entity("User1");
+        let step = ExternalStepData::new::<DummyValue>("ExternalTask", participant.clone());
+
+        assert_eq!(step.name, "ExternalTask");
+        assert_eq!(step.expected_participant, participant);
+        // Schema should not be empty
+        let schema_json = serde_json::to_value(&step.schema).unwrap();
+        assert!(schema_json.is_object());
+    }
+
+    #[test]
+    fn test_steps_get_missing() {
         let builder = StepsBuilder::default();
-        let s1 = builder.add_start();
-        let s2 = builder.add_start();
+        builder.add_start::<()>(Participant::Everyone).unwrap();
+        builder.add("A").unwrap();
         builder.add_end();
 
-        // add_start should return the same Arc if called twice
-        assert_eq!(s1, s2);
+        let steps = builder.build().unwrap();
+
+        assert!(steps.get("DoesNotExist").is_none());
+    }
+
+    #[test]
+    fn test_external_steps_collection() {
+        let builder = StepsBuilder::default();
+        builder.add_start::<()>(Participant::Everyone).unwrap();
+
+        let participant = Participant::entity("UserX");
+        let ext = ExternalStepData::new::<DummyValue>("External", participant.clone());
+
+        builder.add_external(ext.clone()).unwrap();
+        builder.add("Internal").unwrap();
+        builder.add_end();
 
         let steps = builder.build().unwrap();
-        // Should only contain one "Start"
-        let start_count = steps.steps().filter(|&s| s == Step::START).count();
-        assert_eq!(start_count, 1);
+
+        let collected: Vec<&ExternalStepData> = steps.external_steps().collect();
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0], &ext);
+    }
+
+    #[test]
+    fn test_step_is_start_and_is_end() {
+        let builder = StepsBuilder::default();
+        let s = builder.add_start::<()>(Participant::Everyone).unwrap();
+        let e = builder.add_end();
+
+        assert!(s.is_start());
+        assert!(!s.is_end());
+        assert!(e.is_end());
+        assert!(!e.is_start());
+    }
+
+    #[test]
+    fn test_step_as_external_none() {
+        let builder = StepsBuilder::default();
+        builder.add_start::<()>(Participant::Everyone).unwrap();
+        builder.add("Internal").unwrap();
+        builder.add_end();
+        let steps = builder.build().unwrap();
+
+        assert!(steps.get("Internal").unwrap().external_data().is_none());
+    }
+
+    #[test]
+    fn test_step_as_external_some() {
+        let participant = Participant::entity("User1");
+        let ext = ExternalStepData::new::<DummyValue>("Ext", participant.clone());
+
+        let builder = StepsBuilder::default();
+        builder.add_start::<()>(Participant::Everyone).unwrap();
+        builder.add_external(ext.clone()).unwrap();
+        builder.add_end();
+
+        let steps = builder.build().unwrap();
+        let step = steps.get("Ext").unwrap();
+
+        assert!(step.external_data().is_some());
+        assert_eq!(step.external_data().unwrap(), &ext);
+    }
+
+    #[test]
+    fn test_steps_serialize() {
+        let builder = StepsBuilder::default();
+        builder.add_start::<()>(Participant::Everyone).unwrap();
+        builder.add("A").unwrap();
+        builder
+            .add_external(ExternalStepData::new::<DummyValue>(
+                "B",
+                Participant::entity("User1"),
+            ))
+            .unwrap();
+        builder.add_end();
+
+        let steps = builder.build().unwrap();
+
+        let json = serde_json::to_string(&steps).unwrap();
+        assert_eq!(json, r#"["Start","A","B","End"]"#);
+    }
+
+    #[test]
+    fn test_step_serialize() {
+        let builder = StepsBuilder::default();
+        builder.add_start::<()>(Participant::Everyone).unwrap();
+        builder.add_end();
+
+        let steps = builder.build().unwrap();
+
+        let start_json = serde_json::to_string(&Step::from(steps.start())).unwrap();
+        assert_eq!(start_json, r#""Start""#);
+    }
+
+    #[test]
+    fn test_step_hash() {
+        use std::collections::HashSet;
+
+        let builder = StepsBuilder::default();
+        builder.add_start::<()>(Participant::Everyone).unwrap();
+        builder.add("A").unwrap();
+        builder.add_end();
+        let steps = builder.build().unwrap();
+
+        let mut set = HashSet::new();
+        set.insert(steps.get("A").unwrap());
+        // Same step instance (Arc ptr) must not add a new item
+        set.insert(steps.get("A").unwrap());
+
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn test_try_from_builder_direct() {
+        // This exercises TryFrom<StepsBuilder> instead of build()
+        let builder = StepsBuilder::default();
+        builder.add_start::<()>(Participant::Everyone).unwrap();
+        builder.add("X").unwrap();
+        builder.add_end();
+
+        let steps_via_try = Steps::try_from(builder.clone()).unwrap();
+        let steps_via_build = builder.build().unwrap();
+
+        assert_eq!(
+            steps_via_try.steps().collect::<Vec<_>>(),
+            steps_via_build.steps().collect::<Vec<_>>()
+        );
     }
 }

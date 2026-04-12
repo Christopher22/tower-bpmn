@@ -6,8 +6,8 @@ use std::{any::Any, sync::Arc};
 use tokio::sync::broadcast::{Receiver, Sender};
 
 use super::{
-    DynamicInput, DynamicValue, ExtendedExecutor, InstanceId, InstanceSpawnError, Instances,
-    MetaData, Process, ProcessName, Step, StorageBackend, Value,
+    DynamicValue, ExtendedExecutor, ExternalStep, InstanceId, InstanceSpawnError, Instances,
+    MetaData, Process, ProcessName, Step, StorageBackend, Value, runtime::DynamicInput,
 };
 
 mod broker;
@@ -111,9 +111,9 @@ impl Messages {
     }
 
     /// Register a callback for sending dynamic input to waiting processes.
-    pub(crate) fn register_input_for_step<V: Value>(&self, step: Step, owner: Participant) {
+    pub(crate) fn register_input_for_step<V: Value>(&self, step: ExternalStep) {
         self.dynamic_send
-            .insert(step, DynamicInput::new::<V>(owner));
+            .insert(step.clone().into(), DynamicInput::new::<V>(step));
     }
 
     /// Register a callback for spawning new process instances with messages, which is used for messages that start new process instances.
@@ -123,7 +123,7 @@ impl Messages {
         instances: Arc<Instances<E, B>>,
     ) {
         self.dynamic_spawn = Some((
-            DynamicInput::for_process::<P>(),
+            DynamicInput::new::<P::Input>(instances.registered_process.steps.start()),
             Arc::new(move |value| match value.downcast::<P::Input>() {
                 Ok(input) => Ok(instances.run(*input)),
                 Err(_) => Err(InstanceSpawnError::InvalidInput(
@@ -147,7 +147,7 @@ impl Messages {
         ) -> Result<InstanceId, InstanceSpawnError>,
     ) -> Result<InstanceId, InstanceSpawnError> {
         if let Some((input, instance_spawn)) = self.dynamic_spawn.as_ref() {
-            if !context.is_suitable_for(&input.responsible) {
+            if !context.is_suitable_for(&input.expected_participant) {
                 return Err(InstanceSpawnError::InvalidContext);
             }
             callback(input, instance_spawn)
@@ -297,7 +297,10 @@ impl Sendable for Message<Step, serde_json::Value, CorrelationKey> {
             .get(&self.target)
             .ok_or(MessageError::NoTarget)?;
 
-        if self.context.is_suitable_for(&dynamic_input.responsible) {
+        if self
+            .context
+            .is_suitable_for(&dynamic_input.expected_participant)
+        {
             return Err(MessageError::Forbidden);
         }
 

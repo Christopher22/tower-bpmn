@@ -1,4 +1,6 @@
-use super::super::{Process, Value, messages::Participant};
+use crate::bpmn::{ExternalStep, ExternalStepData};
+
+use super::super::{Process, Value};
 
 /// A value which is stored on the heap.
 #[derive(Debug)]
@@ -31,40 +33,36 @@ impl From<DynamicValue> for Box<dyn std::any::Any + Send + Sync> {
 /// A dynamic input which can be used to send messages with dynamic types.
 #[derive(Debug, Clone)]
 pub struct DynamicInput {
-    /// The JSON schema of the input type.
-    pub json_schema: serde_json::Value,
-    /// The participant responsible for providing the input, which can be used for access control and auditing.
-    pub responsible: Participant,
+    step: ExternalStep,
     cast: fn(serde_json::Value) -> Result<DynamicValue, String>,
-    type_id: std::any::TypeId,
 }
 
 impl DynamicInput {
-    /// Create the dynamic input for a given process.
-    pub fn for_process<P: Process>() -> Self {
-        DynamicInput::new::<P::Input>(P::INITIAL_OWNER)
-    }
-
     /// Creates a new dynamic input for a given type.
-    pub fn new<V: Value>(responsible: Participant) -> Self {
+    pub fn new<V: Value>(external_step: ExternalStep) -> Self {
+        assert!(
+            external_step.as_ref().matches::<V>(),
+            "The external step does not match the expected type for this input"
+        );
         DynamicInput {
-            json_schema: schemars::schema_for!(V).into(),
-            responsible,
+            step: external_step,
             cast: |json| {
                 let value: V = serde_json::from_value(json).map_err(|e| e.to_string())?;
                 Ok(DynamicValue(Box::new(value)))
             },
-            type_id: std::any::TypeId::of::<V>(),
         }
-    }
-
-    /// Checks if the dynamic input matches a given type.
-    pub fn matches<V: Value>(&self) -> bool {
-        self.type_id == std::any::TypeId::of::<V>()
     }
 
     /// Try to cast the value to the expected type.
     pub fn cast(&self, json: serde_json::Value) -> Result<DynamicValue, String> {
         (self.cast)(json)
+    }
+}
+
+impl std::ops::Deref for DynamicInput {
+    type Target = ExternalStepData;
+
+    fn deref(&self) -> &Self::Target {
+        self.step.as_ref()
     }
 }
