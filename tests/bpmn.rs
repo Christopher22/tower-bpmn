@@ -1,8 +1,8 @@
-use axum_bpmn::bpmn::{
+use std::time::Duration;
+use tower_bpmn::bpmn::{
     InMemory, IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Step, Storage, Token,
     messages::{Context, CorrelationKey, Message},
 };
-use std::time::Duration;
 
 // ============================================================================
 // PROCESS DEFINITIONS
@@ -109,9 +109,9 @@ impl Process for ParallelAggregationProcess {
         &self,
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
-        let [left, right] = process.split(axum_bpmn::bpmn::gateways::And("AND Split".into()));
+        let [left, right] = process.split(tower_bpmn::bpmn::gateways::And("AND Split".into()));
         ProcessBuilder::join(
-            axum_bpmn::bpmn::gateways::And("Join path".into()),
+            tower_bpmn::bpmn::gateways::And("Join path".into()),
             [
                 left.then("left-path", |_token, value| value + 10),
                 right.then("right-path", |_token, value| value + 20),
@@ -167,7 +167,7 @@ impl Process for TypeConversionProcess {
         &self,
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
-        process.then("convert-to-string", |_token, value| format!("ID-{}", value))
+        process.then("convert-to-string", |_token, value| format!("ID-{value}"))
     }
 }
 
@@ -195,7 +195,7 @@ impl Process for ExclusiveGatewayProcess {
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
         // Assuming a standard conditional API for the Exclusive gateway
-        let [high_path, low_path] = process.split(axum_bpmn::bpmn::gateways::Xor::for_splitting(
+        let [high_path, low_path] = process.split(tower_bpmn::bpmn::gateways::Xor::for_splitting(
             "Check size",
             |_, v| match v {
                 ..=100 => 1,
@@ -204,7 +204,7 @@ impl Process for ExclusiveGatewayProcess {
         ));
 
         ProcessBuilder::join(
-            axum_bpmn::bpmn::gateways::Xor::for_joining("Estimate result result"),
+            tower_bpmn::bpmn::gateways::Xor::for_joining("Estimate result result"),
             [
                 high_path.then("high-path", |_token, _| "HIGH".to_string()),
                 low_path.then("low-path", |_token, _| "LOW".to_string()),
@@ -233,13 +233,13 @@ impl Process for NestedGatewayProcess {
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
         let [outer_left, outer_right] =
-            process.split(axum_bpmn::bpmn::gateways::And("Outer AND".into()));
+            process.split(tower_bpmn::bpmn::gateways::And("Outer AND".into()));
 
         // Nesting an AND gateway inside the left branch
         let [inner_left, inner_right] =
-            outer_left.split(axum_bpmn::bpmn::gateways::And("Inner AND".into()));
+            outer_left.split(tower_bpmn::bpmn::gateways::And("Inner AND".into()));
         let inner_join = ProcessBuilder::join(
-            axum_bpmn::bpmn::gateways::And("Inner Join".into()),
+            tower_bpmn::bpmn::gateways::And("Inner Join".into()),
             [
                 inner_left.then("inner-add-1", |_token, v| v + 1),
                 inner_right.then("inner-add-2", |_token, v| v + 2),
@@ -250,7 +250,7 @@ impl Process for NestedGatewayProcess {
         let outer_right_path = outer_right.then("outer-mul", |_token, v| v * 10);
 
         ProcessBuilder::join(
-            axum_bpmn::bpmn::gateways::And("Final Join".into()),
+            tower_bpmn::bpmn::gateways::And("Final Join".into()),
             [inner_join, outer_right_path],
         )
         .then("final-sum", |_token, [inner_res, outer_res]| {
@@ -291,7 +291,7 @@ fn test_metadata_parallel_aggregation() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_engine_registry_allows_multiple_registrations() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     assert!(runtime.register_process(MessageTarget).is_ok());
     assert!(runtime.register_process(WaitForMessageProcess).is_ok());
     assert!(runtime.register_process(ThrowMessageProcess).is_ok());
@@ -299,7 +299,7 @@ async fn test_engine_registry_allows_multiple_registrations() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_unregistered_process_fails_to_start() {
-    let runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     // Intentionally skipping registration
     let result = runtime.run(SimpleSequentialProcess, 10);
     assert!(
@@ -312,7 +312,7 @@ async fn test_unregistered_process_fails_to_start() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_sequential_execution_correctness() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(SimpleSequentialProcess).unwrap();
 
     let instance = runtime.run(SimpleSequentialProcess, 10).unwrap();
@@ -328,7 +328,7 @@ async fn test_sequential_execution_correctness() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_sequential_execution_last_step() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(SimpleSequentialProcess).unwrap();
 
     let instance = runtime.run(SimpleSequentialProcess, 0).unwrap();
@@ -343,7 +343,7 @@ async fn test_sequential_execution_last_step() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_type_conversion_process() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(TypeConversionProcess).unwrap();
 
     let instance = runtime.run(TypeConversionProcess, 404).unwrap();
@@ -358,7 +358,7 @@ async fn test_type_conversion_process() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_token_get_last() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(TypeConversionProcess).unwrap();
 
     let instance = runtime.run(TypeConversionProcess, 200).unwrap();
@@ -375,7 +375,7 @@ async fn test_token_get_last() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_message_target_identity_behavior() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(MessageTarget).unwrap();
 
     let instance = runtime.run(MessageTarget, 99).unwrap();
@@ -393,7 +393,7 @@ async fn test_message_target_identity_behavior() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_parallel_gateway_join_produces_combined_data_object() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime
         .register_process(ParallelAggregationProcess)
         .unwrap();
@@ -411,7 +411,7 @@ async fn test_parallel_gateway_join_produces_combined_data_object() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_parallel_aggregation_with_negative_inputs() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime
         .register_process(ParallelAggregationProcess)
         .unwrap();
@@ -428,7 +428,7 @@ async fn test_parallel_aggregation_with_negative_inputs() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_multiple_concurrent_parallel_aggregations() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime
         .register_process(ParallelAggregationProcess)
         .unwrap();
@@ -461,7 +461,7 @@ fn test_correlation_key_uniqueness() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_throw_then_catch_message_event_with_correlation() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(ThrowMessageProcess).unwrap();
     runtime.register_process(WaitForMessageProcess).unwrap();
 
@@ -486,7 +486,7 @@ async fn test_throw_then_catch_message_event_with_correlation() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_correlation_keys_isolate_parallel_message_instances() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(WaitForMessageProcess).unwrap();
 
     let key_a = CorrelationKey::new();
@@ -515,7 +515,7 @@ async fn test_correlation_keys_isolate_parallel_message_instances() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_message_catch_with_early_send_buffers_correctly() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(WaitForMessageProcess).unwrap();
 
     let key = CorrelationKey::new();
@@ -538,7 +538,7 @@ async fn test_message_catch_with_early_send_buffers_correctly() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_throw_message_process_payload_extraction() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(ThrowMessageProcess).unwrap();
 
     let key = CorrelationKey::new();
@@ -555,7 +555,7 @@ async fn test_throw_message_process_payload_extraction() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_wait_for_message_post_processing_logic() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(WaitForMessageProcess).unwrap();
 
     let key = CorrelationKey::new();
@@ -585,7 +585,7 @@ async fn test_wait_for_message_post_processing_logic() {
 #[tokio::test(flavor = "current_thread")]
 async fn test_complex_concurrent_workflow_orchestration() {
     // Ensuring the engine handles multiple disconnected processes concurrently without cross-contamination.
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(ThrowMessageProcess).unwrap();
     runtime.register_process(WaitForMessageProcess).unwrap();
     runtime
@@ -617,7 +617,7 @@ async fn test_complex_concurrent_workflow_orchestration() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_exclusive_gateway_routes_high_condition() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(ExclusiveGatewayProcess).unwrap();
 
     let instance = runtime.run(ExclusiveGatewayProcess, 150).unwrap();
@@ -633,7 +633,7 @@ async fn test_exclusive_gateway_routes_high_condition() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_exclusive_gateway_routes_low_condition() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(ExclusiveGatewayProcess).unwrap();
 
     let instance = runtime.run(ExclusiveGatewayProcess, 50).unwrap();
@@ -648,7 +648,7 @@ async fn test_exclusive_gateway_routes_low_condition() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_nested_parallel_gateways_synchronize_correctly() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(NestedGatewayProcess).unwrap();
 
     // Input: 5
@@ -669,7 +669,7 @@ async fn test_nested_parallel_gateways_synchronize_correctly() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_process_suspends_and_does_not_terminate_prematurely() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(WaitForMessageProcess).unwrap();
 
     let key = CorrelationKey::new();
@@ -706,7 +706,7 @@ async fn test_process_suspends_and_does_not_terminate_prematurely() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_engine_state_clears_completed_instances() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(SimpleSequentialProcess).unwrap(); // Assuming from previous snippet
 
     let instance = runtime.run(SimpleSequentialProcess, 10).unwrap();
@@ -734,7 +734,7 @@ async fn test_engine_state_clears_completed_instances() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_throw_message_ends_cleanly_after_emission() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(ThrowMessageProcess).unwrap();
     // Intentionally NOT registering the Wait process.
 

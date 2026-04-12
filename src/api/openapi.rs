@@ -132,7 +132,7 @@ pub(super) fn build<E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
     serde_json::to_value(OpenApiDocument {
         openapi: "3.0.3",
         info: OpenApiInfo {
-            title: "axum-bpmn API",
+            title: "tower-bpmn API",
             version: "1.0.0",
         },
         paths,

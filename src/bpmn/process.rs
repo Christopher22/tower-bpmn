@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn test_process_name_display() {
         let name = ProcessName(Cow::Borrowed("test-service"), 5);
-        assert_eq!(format!("{}", name), "test-service-5");
+        assert_eq!(format!("{name}"), "test-service-5");
     }
 
     #[test]

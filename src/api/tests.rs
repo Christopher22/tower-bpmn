@@ -225,7 +225,7 @@ async fn openapi_is_available_at_root_and_entrypoint() {
 
     let (status_entry, body_entry) = call_json(&mut api, get("/api/")).await;
     assert_eq!(status_entry, StatusCode::OK);
-    assert_eq!(body_entry["info"]["title"], "axum-bpmn API");
+    assert_eq!(body_entry["info"]["title"], "tower-bpmn API");
     assert!(body_entry["paths"]["/processes"].is_object());
 }
 

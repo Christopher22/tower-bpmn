@@ -1,4 +1,4 @@
-use axum_bpmn::bpmn::{
+use tower_bpmn::bpmn::{
     InMemory, IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Step, Storage, Token,
     messages::{CorrelationKey, Message},
 };
@@ -104,9 +104,9 @@ impl Process for ParallelAggregationProcess {
         &self,
         process: ProcessBuilder<Self, Self::Input, S>,
     ) -> ProcessBuilder<Self, Self::Output, S> {
-        let [left, right] = process.split(axum_bpmn::bpmn::gateways::And("AND Split".into()));
+        let [left, right] = process.split(tower_bpmn::bpmn::gateways::And("AND Split".into()));
         ProcessBuilder::join(
-            axum_bpmn::bpmn::gateways::And("Join path".into()),
+            tower_bpmn::bpmn::gateways::And("Join path".into()),
             [
                 left.then("left-path", |_token, value| value + 10),
                 right.then("right-path", |_token, value| value + 20),
@@ -117,7 +117,7 @@ impl Process for ParallelAggregationProcess {
 
 #[tokio::test(flavor = "current_thread")]
 async fn throw_then_catch_message_event_with_correlation() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime
         .register_process(ThrowMessageProcess)
         .expect("throw process registration must succeed");
@@ -150,7 +150,7 @@ async fn throw_then_catch_message_event_with_correlation() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn correlation_keys_isolate_parallel_message_instances() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime
         .register_process(WaitForMessageProcess)
         .expect("wait process registration must succeed");
@@ -185,7 +185,7 @@ async fn correlation_keys_isolate_parallel_message_instances() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn parallel_gateway_join_produces_combined_data_object() {
-    let mut runtime: Runtime<axum_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
+    let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime
         .register_process(ParallelAggregationProcess)
         .expect("parallel process registration must succeed");

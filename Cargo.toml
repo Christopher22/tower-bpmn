@@ -1,7 +1,13 @@
 [package]
-name = "axum-bpmn"
+name = "tower-bpmn"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.85"
+description = "BPMN runtime for custom backends built on Tower"
+license = "MIT"
+keywords = ["bpmn", "workflow", "axum", "tower", "orchestration"]
+categories = ["asynchronous", "web-programming"]
+repository = "https://github.com/Christopher22/tower-bpmn"
 
 [dependencies]
 chrono = { version = "0.4.43", features = ["serde"] }
