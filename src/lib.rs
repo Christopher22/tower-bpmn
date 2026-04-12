@@ -20,5 +20,5 @@ mod bpmn;
 pub mod executor;
 pub(crate) mod petri_net;
 
-pub use api::Api;
+pub use api::{Api, EverybodyGuard, Guard, OpenApiSecurityScheme};
 pub use bpmn::*;

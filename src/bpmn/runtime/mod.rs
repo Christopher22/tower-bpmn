@@ -10,7 +10,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     ExtendedExecutor, Process, ProcessBuilder, ProcessName,
-    messages::{Message, MessageBroker, MessageError},
+    messages::{Context, Message, MessageBroker, MessageError},
 };
 
 pub use dynamic::{DynamicInput, DynamicValue};
@@ -67,6 +67,20 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
         Ok(())
     }
 
+    /// Resume all unfinished instances provided by the storage backend, returning the IDs of the resumed instances.
+    pub fn resume_unfinished_instances(&self) -> Result<Vec<InstanceId>, ResumeError> {
+        self.storage_backend
+            .unfinished_instances()
+            .into_iter()
+            .map(
+                |(process_name, instance_id)| match self.registered_processes.get(&process_name) {
+                    Some(instances) => instances.resume(instance_id),
+                    None => Err(ResumeError::NotFound),
+                },
+            )
+            .collect()
+    }
+
     /// Return all registered processes.
     pub fn registered_processes(&self) -> impl Iterator<Item = &RegisteredProcess<B>> {
         self.registered_processes
@@ -110,9 +124,19 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
         process_name: ProcessName,
         input: JsonValue,
     ) -> Result<InstanceId, InstanceSpawnError> {
-        match self
-            .messages
-            .send(Message::for_dynamic_starting(process_name, input))
+        self.run_dynamic_with_context(process_name, input, Context::default())
+    }
+
+    /// Starts a registered process by its name using JSON input and explicit message context.
+    pub fn run_dynamic_with_context(
+        &self,
+        process_name: ProcessName,
+        input: JsonValue,
+        context: Context,
+    ) -> Result<InstanceId, InstanceSpawnError> {
+        let mut message = Message::for_dynamic_starting(process_name, input);
+        message.context = context;
+        match self.messages.send(message)
         {
             Ok(spawned_process) => spawned_process,
             Err(MessageError::NoTarget) => Err(InstanceSpawnError::Unregistered),

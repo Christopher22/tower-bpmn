@@ -3,8 +3,9 @@ use http_body_util::{Empty, Full};
 use tower_service::Service;
 
 use crate::{
-    Api, InMemory, IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Storage, Token,
-    executor::TokioExecutor, messages::CorrelationKey,
+    Api, Guard, InMemory, IncomingMessage, MetaData, OpenApiSecurityScheme, Process,
+    ProcessBuilder, Runtime, Storage, Token, executor::TokioExecutor,
+    messages::{CorrelationKey, Participant},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,12 +70,89 @@ impl Process for WaitProcess {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RestrictedProcess;
+
+impl Process for RestrictedProcess {
+    type Input = i32;
+    type Output = i32;
+
+    const INITIAL_OWNER: Participant = Participant::role("admin");
+
+    fn metadata(&self) -> &MetaData {
+        static META: MetaData = MetaData::new("restricted-process", "Requires admin context");
+        &META
+    }
+
+    fn define<S: Storage>(
+        &self,
+        process: ProcessBuilder<Self, Self::Input, S>,
+    ) -> ProcessBuilder<Self, Self::Output, S> {
+        process.then("identity", |_token: &Token<S>, value| value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NobodyGuard;
+
+impl Guard for NobodyGuard {
+    fn context_from_request(&self, _request: &http::request::Parts) -> crate::messages::Context {
+        std::iter::once(Participant::Nobody).collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RoleGuard;
+
+impl Guard for RoleGuard {
+    fn context_from_request(&self, _request: &http::request::Parts) -> crate::messages::Context {
+        std::iter::once(Participant::role("admin")).collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ApiKeyGuard;
+
+impl Guard for ApiKeyGuard {
+    fn context_from_request(&self, _request: &http::request::Parts) -> crate::messages::Context {
+        crate::messages::Context::default()
+    }
+
+    fn openapi_security_scheme(&self) -> Option<OpenApiSecurityScheme> {
+        Some(OpenApiSecurityScheme::new(
+            "ApiKeyAuth",
+            serde_json::json!({"type": "apiKey", "in": "header", "name": "x-api-key"}),
+            Vec::new(),
+        ))
+    }
+}
+
 fn build_api() -> Api<TokioExecutor, InMemory> {
     let mut runtime = Runtime::default();
     runtime.register_process(StartProcess).unwrap();
     runtime.register_process(MessageTarget).unwrap();
     runtime.register_process(WaitProcess).unwrap();
     Api::new("api", runtime)
+}
+
+fn build_api_with_custom_path() -> Api<TokioExecutor, InMemory> {
+    let mut runtime = Runtime::default();
+    runtime.register_process(StartProcess).unwrap();
+    runtime.register_process(MessageTarget).unwrap();
+    runtime.register_process(WaitProcess).unwrap();
+
+    Api::builder("api", runtime)
+        .add_get_json("/health", StatusCode::OK, |_, _| {
+            Ok(serde_json::json!({"status":"ok"}))
+        })
+        .build()
+}
+
+fn build_restricted_api<G: Guard>(guard: G) -> Api<TokioExecutor, InMemory, G> {
+    let mut runtime = Runtime::default();
+    runtime.register_process(RestrictedProcess).unwrap();
+
+    Api::builder("api", runtime).with_guard(guard).build()
 }
 
 fn get(path: &str) -> Request<Empty<bytes::Bytes>> {
@@ -104,7 +182,7 @@ fn post_raw(path: &str, body: &str) -> Request<Full<bytes::Bytes>> {
 }
 
 async fn call_json<B>(
-    api: &mut Api<TokioExecutor, InMemory>,
+    api: &mut impl Service<Request<B>, Response = http::Response<String>, Error = std::convert::Infallible>,
     request: Request<B>,
 ) -> (StatusCode, serde_json::Value)
 where
@@ -139,7 +217,7 @@ async fn openapi_is_available_at_root_and_entrypoint() {
 
     let (status_root, body_root) = call_json(&mut api, get("/")).await;
     assert_eq!(status_root, StatusCode::OK);
-    assert_eq!(body_root["openapi"], "3.1.0");
+    assert_eq!(body_root["openapi"], "3.0.3");
 
     let (status_entry, body_entry) = call_json(&mut api, get("/api/")).await;
     assert_eq!(status_entry, StatusCode::OK);
@@ -351,4 +429,69 @@ async fn trailing_slashes_are_accepted() {
     let (status_instances, _) =
         call_json(&mut api, get("/api/processes/start-process-1/instances/")).await;
     assert_eq!(status_instances, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn custom_paths_can_be_registered_by_library_users() {
+    let mut api = build_api_with_custom_path();
+
+    let (status, body) = call_json(&mut api, get("/api/health")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn guard_with_nobody_cannot_access_protected_route() {
+    let mut api = Api::<TokioExecutor, InMemory>::builder(
+        "api",
+        Runtime::<TokioExecutor, InMemory>::default(),
+    )
+        .with_guard(NobodyGuard)
+        .add_get_json_for(
+            "/health",
+            Participant::role("admin"),
+            StatusCode::OK,
+            |_, _| {
+            Ok(serde_json::json!({"status":"ok"}))
+            },
+        )
+        .build();
+
+    let (status, body) = call_json(&mut api, get("/api/health")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["message"], "not allowed for this participant");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn guard_context_is_used_for_process_start() {
+    let mut blocked = build_restricted_api(crate::EverybodyGuard);
+    let (blocked_status, blocked_body) =
+        call_json(&mut blocked, post("/api/processes/restricted-process-1/instances", 7.into()))
+            .await;
+    assert_eq!(blocked_status, StatusCode::FORBIDDEN);
+    assert!(blocked_body["message"]
+        .as_str()
+        .is_some_and(|value| value.contains("not allowed for this participant")));
+
+    let mut allowed = build_restricted_api(RoleGuard);
+    let (allowed_status, allowed_body) =
+        call_json(&mut allowed, post("/api/processes/restricted-process-1/instances", 7.into()))
+            .await;
+    assert_eq!(allowed_status, StatusCode::ACCEPTED);
+    assert!(allowed_body["id"].is_string());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openapi_includes_guard_security_scheme() {
+    let mut api = Api::<TokioExecutor, InMemory>::builder(
+        "api",
+        Runtime::<TokioExecutor, InMemory>::default(),
+    )
+        .with_guard(ApiKeyGuard)
+        .build();
+
+    let (status, body) = call_json(&mut api, get("/")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["components"]["securitySchemes"]["ApiKeyAuth"].is_object());
+    assert_eq!(body["security"][0]["ApiKeyAuth"], serde_json::json!([]));
 }

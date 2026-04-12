@@ -1,15 +1,39 @@
-//! OpenAPI document generation for the HTTP API.
+//! Generic OpenAPI renderer for route-provided metadata.
 
 use std::collections::BTreeMap;
 
-use schemars::JsonSchema;
 use serde::Serialize;
 
-use super::{
-    error::Error,
-    route::{ProcessSummary, StartedInstanceResponse},
-};
-use crate::{ExtendedExecutor, StorageBackend, bpmn::Runtime};
+use super::{guard::OpenApiSecurityScheme, route::Route};
+use crate::{ExtendedExecutor, StorageBackend};
+
+/// Serializable route-derived OpenAPI view used by the renderer.
+#[derive(Default)]
+pub(super) struct OpenApiRouteData {
+    pub(super) paths: BTreeMap<String, OpenApiPathData>,
+    pub(super) components: BTreeMap<String, serde_json::Value>,
+}
+
+/// One OpenAPI path item collected from one route node.
+#[derive(Default)]
+pub(super) struct OpenApiPathData {
+    pub(super) get: Option<OpenApiOperationData>,
+    pub(super) post: Option<OpenApiOperationData>,
+}
+
+/// Operation metadata that will be rendered to OpenAPI.
+pub(super) struct OpenApiOperationData {
+    pub(super) summary: &'static str,
+    pub(super) request_body: Option<serde_json::Value>,
+    pub(super) responses: BTreeMap<String, OpenApiResponseData>,
+    pub(super) is_public: bool,
+}
+
+/// Response metadata that will be rendered to OpenAPI.
+pub(super) struct OpenApiResponseData {
+    pub(super) description: &'static str,
+    pub(super) content: Option<serde_json::Value>,
+}
 
 #[derive(Serialize)]
 struct OpenApiDocument {
@@ -17,6 +41,8 @@ struct OpenApiDocument {
     info: OpenApiInfo,
     paths: BTreeMap<String, PathItem>,
     components: OpenApiComponents,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    security: Option<Vec<BTreeMap<String, Vec<String>>>>,
 }
 
 #[derive(Serialize)]
@@ -28,9 +54,11 @@ struct OpenApiInfo {
 #[derive(Serialize)]
 struct OpenApiComponents {
     schemas: BTreeMap<String, serde_json::Value>,
+    #[serde(rename = "securitySchemes", skip_serializing_if = "Option::is_none")]
+    security_schemes: Option<BTreeMap<String, serde_json::Value>>,
 }
 
-#[derive(Clone, Serialize, Default)]
+#[derive(Serialize, Default)]
 struct PathItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     get: Option<Operation>,
@@ -38,180 +66,116 @@ struct PathItem {
     post: Option<Operation>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Serialize)]
 struct Operation {
     summary: &'static str,
     responses: BTreeMap<String, OpenApiResponse>,
     #[serde(rename = "requestBody", skip_serializing_if = "Option::is_none")]
     request_body: Option<OpenApiRequestBody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    security: Option<Vec<BTreeMap<String, Vec<String>>>>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Serialize)]
 struct OpenApiRequestBody {
     required: bool,
     content: OpenApiContent,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Serialize)]
 struct OpenApiResponse {
     description: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<OpenApiContent>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Serialize)]
 struct OpenApiContent {
     #[serde(rename = "application/json")]
     application_json: OpenApiMediaType,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Serialize)]
 struct OpenApiMediaType {
     schema: serde_json::Value,
 }
 
-/// Response body for the process collection endpoint.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub(super) struct ProcessesResponse {
-    pub(super) processes: Vec<ProcessSummary>,
-}
-
-/// Builds the OpenAPI document for the currently registered processes.
+/// Builds the OpenAPI document from route-owned semantics.
 pub(super) fn build<E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
-    runtime: &Runtime<E, B>,
+    root: &Route<E, B>,
+    security_scheme: Option<OpenApiSecurityScheme>,
 ) -> serde_json::Value {
-    let mut paths = BTreeMap::from([
-        (
-            "/".to_string(),
-            get_only(
-                "Get OpenAPI document",
-                [(
-                    "200",
-                    response("OpenAPI document", schema_for::<serde_json::Value>()),
-                )],
-            ),
-        ),
-        (
-            "/processes".to_string(),
-            PathItem {
-                get: Some(operation(
-                    "List registered processes",
-                    None,
-                    [(
-                        "200",
-                        response_with_ref("Registered processes", "ProcessesResponse"),
-                    )],
-                )),
-                post: Some(operation(
-                    "Method not allowed",
-                    None,
-                    [("405", response_with_ref("Method not allowed", "Error"))],
-                )),
-            },
-        ),
-    ]);
+    let route_data = root.openapi_data();
 
-    for process in runtime.registered_processes() {
-        let process_name = crate::ProcessName::from(&process.meta_data).to_string();
-        let request_body = OpenApiRequestBody {
-            required: true,
-            content: json_content(process.input.json_schema.clone()),
-        };
-        let process_item = process_instances_path_item(request_body);
+    let paths = route_data
+        .paths
+        .into_iter()
+        .map(|(path, path_data)| (path, render_path(path_data)))
+        .collect();
 
-        paths.insert(format!("/processes/{process_name}"), process_item.clone());
-        paths.insert(format!("/processes/{process_name}/instances"), process_item);
-    }
+    let (security_schemes, security) = security_scheme.map_or((None, None), |value| {
+        let OpenApiSecurityScheme {
+            name,
+            scheme,
+            scopes,
+        } = value;
+
+        let mut schemes = BTreeMap::new();
+        schemes.insert(name.clone(), scheme);
+
+        let mut requirement = BTreeMap::new();
+        requirement.insert(name, scopes);
+
+        (Some(schemes), Some(vec![requirement]))
+    });
 
     serde_json::to_value(OpenApiDocument {
-        openapi: "3.1.0",
+        openapi: "3.0.3",
         info: OpenApiInfo {
             title: "axum-bpmn API",
             version: "1.0.0",
         },
         paths,
         components: OpenApiComponents {
-            schemas: [
-                ("Error".to_string(), schema_for::<Error>()),
-                (
-                    "ProcessesResponse".to_string(),
-                    schema_for::<ProcessesResponse>(),
-                ),
-                ("ProcessSummary".to_string(), schema_for::<ProcessSummary>()),
-                (
-                    "StartedInstanceResponse".to_string(),
-                    schema_for::<StartedInstanceResponse>(),
-                ),
-                (
-                    "Instances".to_string(),
-                    schema_for::<crate::Instances<E, B>>(),
-                ),
-                (
-                    "Instance".to_string(),
-                    schema_for::<crate::Instance<E, B>>(),
-                ),
-            ]
-            .into_iter()
-            .collect(),
+            schemas: route_data.components,
+            security_schemes,
         },
+        security,
     })
     .expect("openapi serialization should succeed")
 }
 
-fn process_instances_path_item(request_body: OpenApiRequestBody) -> PathItem {
+fn render_path(path_data: OpenApiPathData) -> PathItem {
     PathItem {
-        get: Some(operation(
-            "List process instances",
-            None,
-            [
-                ("200", response_with_ref("Process instances", "Instances")),
-                ("404", response_with_ref("Unknown process", "Error")),
-            ],
-        )),
-        post: Some(operation(
-            "Start process instance",
-            Some(request_body),
-            [
-                (
-                    "202",
-                    response_with_ref("Started instance", "StartedInstanceResponse"),
-                ),
-                ("400", response_with_ref("Invalid request", "Error")),
-                ("404", response_with_ref("Unknown process", "Error")),
-            ],
-        )),
+        get: path_data.get.map(render_operation),
+        post: path_data.post.map(render_operation),
     }
 }
 
-fn get_only(
-    summary: &'static str,
-    responses: impl IntoIterator<Item = (&'static str, OpenApiResponse)>,
-) -> PathItem {
-    PathItem {
-        get: Some(operation(summary, None, responses)),
-        post: None,
-    }
-}
-
-fn operation(
-    summary: &'static str,
-    request_body: Option<OpenApiRequestBody>,
-    responses: impl IntoIterator<Item = (&'static str, OpenApiResponse)>,
-) -> Operation {
+fn render_operation(operation: OpenApiOperationData) -> Operation {
     Operation {
-        summary,
-        responses: responses
+        summary: operation.summary,
+        responses: operation
+            .responses
             .into_iter()
-            .map(|(status, response)| (status.to_string(), response))
+            .map(|(status, response)| (status, render_response(response)))
             .collect(),
-        request_body,
+        request_body: operation.request_body.map(|schema| OpenApiRequestBody {
+            required: true,
+            content: json_content(schema),
+        }),
+        security: if operation.is_public {
+            Some(Vec::new())
+        } else {
+            None
+        },
     }
 }
 
-fn response(description: &'static str, schema: serde_json::Value) -> OpenApiResponse {
+fn render_response(response: OpenApiResponseData) -> OpenApiResponse {
     OpenApiResponse {
-        description,
-        content: Some(json_content(schema)),
+        description: response.description,
+        content: response.content.map(json_content),
     }
 }
 
@@ -219,16 +183,4 @@ fn json_content(schema: serde_json::Value) -> OpenApiContent {
     OpenApiContent {
         application_json: OpenApiMediaType { schema },
     }
-}
-
-fn schema_ref(schema_name: &str) -> serde_json::Value {
-    serde_json::json!({ "$ref": format!("#/components/schemas/{schema_name}") })
-}
-
-fn response_with_ref(description: &'static str, schema_name: &str) -> OpenApiResponse {
-    response(description, schema_ref(schema_name))
-}
-
-fn schema_for<T: JsonSchema>() -> serde_json::Value {
-    schemars::schema_for!(T).into()
 }

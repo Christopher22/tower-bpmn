@@ -75,7 +75,7 @@ impl Error {
         }
     }
 
-    fn forbidden(message: impl Into<String>) -> Self {
+    pub fn forbidden(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
             message: message.into(),
