@@ -2,7 +2,7 @@ use dashmap::DashMap;
 use serde::ser::{SerializeSeq, SerializeStruct};
 
 use super::super::ExtendedExecutor;
-use super::{Instance, InstanceId, RegisteredProcess, ResumeError, StorageBackend, Value};
+use super::{Instance, InstanceId, RegisteredProcess, StorageError, StorageBackend, Value};
 
 /// A collection of process instances for a specific registered process definition.
 #[derive(Debug)]
@@ -61,7 +61,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instances<E, B> {
     }
 
     /// Try to resume a paused instance.
-    pub fn resume(&self, id: InstanceId) -> Result<InstanceId, ResumeError> {
+    pub fn resume(&self, id: InstanceId) -> Result<InstanceId, StorageError> {
         let instance = Instance::resume(
             &self.registered_process,
             self.executor.clone(),

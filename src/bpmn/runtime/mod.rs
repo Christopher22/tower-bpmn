@@ -16,8 +16,8 @@ pub use instance::{Handle, Instance, InstanceId, InstanceNotRunning, InstanceSta
 pub use instances::{InstanceSpawnError, Instances};
 pub use registered_process::RegisteredProcess;
 pub use storage::{
-    InMemory, InMemoryStorage, ResumableProcess, ResumeError, Sqlite, SqliteError, SqliteStorage,
-    Storage, StorageBackend,
+    InMemory, InMemoryStorage, ResumableProcess, Sqlite, SqliteError, SqliteStorage, Storage,
+    StorageBackend, StorageError,
 };
 pub use token::{Token, TokenId, Value};
 
@@ -66,14 +66,14 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
     }
 
     /// Resume all unfinished instances provided by the storage backend, returning the IDs of the resumed instances.
-    pub fn resume_unfinished_instances(&self) -> Result<Vec<InstanceId>, ResumeError> {
+    pub fn resume_unfinished_instances(&self) -> Result<Vec<InstanceId>, StorageError> {
         self.storage_backend
             .unfinished_instances()
             .into_iter()
             .map(
                 |(process_name, instance_id)| match self.registered_processes.get(&process_name) {
                     Some(instances) => instances.resume(instance_id),
-                    None => Err(ResumeError::NotFound),
+                    None => Err(StorageError::NotFound),
                 },
             )
             .collect()

@@ -1,6 +1,8 @@
 mod in_memory;
 mod sqlite;
 
+use serde_json::Value as JsonValue;
+
 use super::super::{ProcessName, State, Step};
 use super::{InstanceId, RegisteredProcess, Token, TokenId, Value};
 use crate::petri_net::{Id, Place};
@@ -12,6 +14,16 @@ pub use self::sqlite::{Sqlite, SqliteError, SqliteStorage};
 pub trait StorageBackend: 'static + Clone + Sized + Send + Sync {
     /// The type of storage used for instances.
     type Storage: Storage;
+
+    /// Query the backend for the values of the given step and instance ID, independentkly of the processes is currently running or already completed.
+    /// The results are returned as a list of JSON values ordered by insertion, which could be deserialized into the expected types by the caller.
+    /// If the step was not executed in the given instance, an empty list is returned.
+    fn query(
+        &self,
+        process: &RegisteredProcess<Self>,
+        step: Step,
+        instance_id: InstanceId,
+    ) -> Result<Vec<JsonValue>, StorageError>;
 
     /// Register a new instance.
     fn new_instance(
@@ -25,7 +37,7 @@ pub trait StorageBackend: 'static + Clone + Sized + Send + Sync {
         &self,
         process: &RegisteredProcess<Self>,
         process_id: InstanceId,
-    ) -> Result<ResumableProcess<Self>, ResumeError>;
+    ) -> Result<ResumableProcess<Self>, StorageError>;
 
     /// Yield a list of all unfinished instances which could be resumed, along with the name of the process they belong to.
     fn unfinished_instances(&self) -> Vec<(ProcessName, InstanceId)>;
@@ -59,20 +71,20 @@ pub trait Storage: 'static + std::fmt::Debug + Clone + Send + Sync + Eq {
 
 /// Errors that can occur when trying to resume a paused instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResumeError {
+pub enum StorageError {
     /// No instance with the given ID was found.
     NotFound,
     /// An instance with the given ID was found, but it belongs to a different process.
     ProcessMismatch,
 }
 
-impl std::fmt::Display for ResumeError {
+impl std::fmt::Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ResumeError::NotFound => write!(f, "Instance not found"),
-            ResumeError::ProcessMismatch => write!(f, "Instance belongs to a different process"),
+            StorageError::NotFound => write!(f, "Instance not found"),
+            StorageError::ProcessMismatch => write!(f, "Instance belongs to a different process"),
         }
     }
 }
 
-impl std::error::Error for ResumeError {}
+impl std::error::Error for StorageError {}

@@ -20,7 +20,7 @@ pub use self::process::{InvalidProcessNameError, MetaData, Process, ProcessName}
 pub use self::runtime::{
     DynamicValue, Handle, InMemory, InMemoryStorage, Instance, InstanceId, InstanceNotRunning,
     InstanceSpawnError, InstanceStatus, Instances, ProcessError, RegisteredProcess,
-    ResumableProcess, ResumeError, Runtime, Sqlite, SqliteError, SqliteStorage, Storage,
+    ResumableProcess, StorageError, Runtime, Sqlite, SqliteError, SqliteStorage, Storage,
     StorageBackend, Token, TokenId, Value,
 };
 pub use self::steps::{

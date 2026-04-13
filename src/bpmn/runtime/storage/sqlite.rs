@@ -3,10 +3,11 @@ use std::{path::Path, sync::Arc};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::Value as JsonValue;
 
 use super::super::super::{ProcessName, Step, Steps};
 use super::super::{InstanceId, RegisteredProcess, Token, TokenId, Value};
-use super::{ResumableProcess, ResumeError, Storage, StorageBackend};
+use super::{ResumableProcess, Storage, StorageBackend, StorageError};
 
 /// Errors emitted while opening or preparing SQLite storage.
 #[derive(Debug)]
@@ -132,6 +133,77 @@ impl Default for Sqlite {
 impl StorageBackend for Sqlite {
     type Storage = SqliteStorage;
 
+    fn query(
+        &self,
+        process: &RegisteredProcess<Self>,
+        step: Step,
+        instance_id: InstanceId,
+    ) -> Result<Vec<JsonValue>, StorageError> {
+        let found_process: Option<(i64, String, u32)> = self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "
+                    SELECT p.id, p.name, p.version
+                    FROM instances i
+                    JOIN processes p ON p.id = i.process_id
+                    WHERE i.id = ?1
+                    ",
+                    params![instance_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+        });
+
+        let Some((process_db_id, name, version)) = found_process else {
+            return Err(StorageError::NotFound);
+        };
+
+        if name != process.meta_data.name.as_ref() || version != process.meta_data.version {
+            return Err(StorageError::ProcessMismatch);
+        }
+
+        let step_db_id: Option<i64> = self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT id FROM steps WHERE process_id = ?1 AND step_name = ?2",
+                    params![process_db_id, step.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+        });
+
+        let Some(step_db_id) = step_db_id else {
+            return Ok(Vec::new());
+        };
+
+        let raw_values: Vec<String> = self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "
+                SELECT value_json
+                FROM finished_steps
+                WHERE instance_id = ?1 AND step_id = ?2
+                ORDER BY id ASC
+                ",
+            )?;
+            let rows = statement
+                .query_map(params![instance_id.to_string(), step_db_id], |row| {
+                    row.get::<_, String>(0)
+                })?;
+
+            let mut values = Vec::new();
+            for row in rows {
+                values.push(row?);
+            }
+
+            Ok(values)
+        });
+
+        Ok(raw_values
+            .into_iter()
+            .filter_map(|value| serde_json::from_str::<JsonValue>(&value).ok())
+            .collect())
+    }
+
     fn new_instance(
         &self,
         process: &RegisteredProcess<Self>,
@@ -207,7 +279,7 @@ impl StorageBackend for Sqlite {
         &self,
         process: &RegisteredProcess<Self>,
         process_id: InstanceId,
-    ) -> Result<ResumableProcess<Self>, ResumeError> {
+    ) -> Result<ResumableProcess<Self>, StorageError> {
         // Resolve the owning process first. This provides both existence and
         // process-mismatch checks in one lookup.
         let found_process: Option<(i64, String, u32)> = self.with_connection(|connection| {
@@ -226,11 +298,11 @@ impl StorageBackend for Sqlite {
         });
 
         let Some((process_db_id, name, version)) = found_process else {
-            return Err(ResumeError::NotFound);
+            return Err(StorageError::NotFound);
         };
 
         if name != process.meta_data.name.as_ref() || version != process.meta_data.version {
-            return Err(ResumeError::ProcessMismatch);
+            return Err(StorageError::ProcessMismatch);
         }
 
         let (step_ids, next_token_slot) = self.with_connection(|connection| {
@@ -293,7 +365,7 @@ impl StorageBackend for Sqlite {
         });
 
         if rows.is_empty() {
-            return Err(ResumeError::NotFound);
+            return Err(StorageError::NotFound);
         }
 
         let mut current_state = Vec::with_capacity(rows.len());
@@ -311,7 +383,7 @@ impl StorageBackend for Sqlite {
         }
 
         if current_state.is_empty() {
-            return Err(ResumeError::NotFound);
+            return Err(StorageError::NotFound);
         }
 
         Ok(ResumableProcess {
@@ -844,6 +916,81 @@ mod tests {
 
         assert_eq!(instances_count, 1);
         assert_eq!(history_count, 1);
+    }
+
+    #[test]
+    fn sqlite_backend_query_returns_values_in_insertion_order() {
+        let backend = Sqlite::in_memory().expect("in-memory sqlite should be available");
+        let mut runtime = Runtime::new(TokioExecutor, backend.clone());
+        runtime
+            .register_process(SqliteDraftProcess)
+            .expect("process registration must succeed");
+
+        let process_name = ProcessName::from(SqliteDraftProcess.metadata());
+        let registered = runtime
+            .get_registered_process(&process_name)
+            .expect("registered process must exist");
+        let instance_id: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+
+        let storage = backend.new_instance(registered, instance_id);
+        let identity = registered
+            .steps
+            .get("identity")
+            .expect("identity step must exist");
+        let token = Token::new(storage.clone());
+        storage.add(token.id(), identity.clone(), 13_i32);
+        storage.add(token.id(), identity.clone(), 21_i32);
+
+        let values = backend
+            .query(registered, identity, instance_id)
+            .expect("query must succeed");
+
+        assert_eq!(values, vec![serde_json::json!(13), serde_json::json!(21)]);
+    }
+
+    #[test]
+    fn sqlite_backend_query_reports_process_mismatch() {
+        let backend = Sqlite::in_memory().expect("in-memory sqlite should be available");
+        let mut runtime = Runtime::new(TokioExecutor, backend.clone());
+        runtime
+            .register_process(SqliteDraftProcess)
+            .expect("draft process registration must succeed");
+        runtime
+            .register_process(SqliteComplexProcess)
+            .expect("complex process registration must succeed");
+
+        let draft_name = ProcessName::from(SqliteDraftProcess.metadata());
+        let draft = runtime
+            .get_registered_process(&draft_name)
+            .expect("draft process must exist");
+        let draft_instance_id: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+        let draft_storage = backend.new_instance(draft, draft_instance_id);
+        let draft_step = draft
+            .steps
+            .get("identity")
+            .expect("identity step must exist");
+        draft_storage.add(Token::new(draft_storage.clone()).id(), draft_step, 11_i32);
+
+        let complex_name = ProcessName::from(SqliteComplexProcess.metadata());
+        let complex = runtime
+            .get_registered_process(&complex_name)
+            .expect("complex process must exist");
+        let complex_step = complex
+            .steps
+            .get("prepare")
+            .expect("prepare step must exist");
+
+        let error = backend
+            .query(complex, complex_step, draft_instance_id)
+            .expect_err("query must fail due to process mismatch");
+
+        assert_eq!(error, StorageError::ProcessMismatch);
     }
 
     #[test]
