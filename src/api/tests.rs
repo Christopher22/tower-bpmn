@@ -246,6 +246,28 @@ async fn openapi_lists_process_paths_and_raw_input_schemas() {
         ["application/json"]["schema"];
     assert_eq!(wait_schema["type"], "string");
     assert_eq!(wait_schema["format"], "uuid");
+
+    let waiting_message_schema = &body["paths"]["/processes/wait-process-1/steps/incoming/{correlation_key}"]
+        ["post"]["requestBody"]["content"]["application/json"]["schema"];
+    assert_eq!(waiting_message_schema["type"], "integer");
+
+    let waiting_message_parameter = &body["paths"]["/processes/wait-process-1/steps/incoming/{correlation_key}"]
+        ["post"]["parameters"][0];
+    assert_eq!(waiting_message_parameter["name"], "correlation_key");
+    assert_eq!(waiting_message_parameter["in"], "path");
+    assert_eq!(waiting_message_parameter["required"], true);
+    assert_eq!(
+        waiting_message_parameter["schema"]["$ref"],
+        "#/components/schemas/CorrelationKey"
+    );
+    assert_eq!(
+        body["components"]["schemas"]["CorrelationKey"]["type"],
+        "string"
+    );
+    assert_eq!(
+        body["components"]["schemas"]["CorrelationKey"]["format"],
+        "uuid"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -334,6 +356,35 @@ async fn process_instance_routes_list_running_instances_on_both_aliases() {
         &instance_id,
         "running"
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn external_step_endpoint_sends_message_to_waiting_process() {
+    let mut api = build_api();
+    let correlation_key = CorrelationKey::new();
+
+    let _ = call_json(
+        &mut api,
+        post(
+            "/api/processes/wait-process-1/instances",
+            serde_json::to_value(correlation_key).unwrap(),
+        ),
+    )
+    .await;
+
+    let message_path = format!("/api/processes/wait-process-1/steps/incoming/{correlation_key}");
+    let (message_status, message_body) =
+        call_json(&mut api, post(&message_path, serde_json::json!(21))).await;
+    assert_eq!(message_status, StatusCode::ACCEPTED);
+    assert_eq!(message_body["status"], "accepted");
+
+    let (invalid_status, invalid_body) = call_json(
+        &mut api,
+        post(&message_path, serde_json::json!("wrong-type")),
+    )
+    .await;
+    assert_eq!(invalid_status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid_body["message"], "invalid message type");
 }
 
 #[tokio::test(flavor = "current_thread")]

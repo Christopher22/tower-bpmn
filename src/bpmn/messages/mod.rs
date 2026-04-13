@@ -297,7 +297,7 @@ impl Sendable for Message<Step, serde_json::Value, CorrelationKey> {
             .get(&self.target)
             .ok_or(MessageError::NoTarget)?;
 
-        if self
+        if !self
             .context
             .is_suitable_for(&dynamic_input.expected_participant)
         {

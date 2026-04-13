@@ -24,9 +24,19 @@ pub(super) struct OpenApiPathData {
 /// Operation metadata that will be rendered to OpenAPI.
 pub(super) struct OpenApiOperationData {
     pub(super) summary: &'static str,
+    pub(super) parameters: Vec<OpenApiParameterData>,
     pub(super) request_body: Option<serde_json::Value>,
     pub(super) responses: BTreeMap<String, OpenApiResponseData>,
     pub(super) is_public: bool,
+}
+
+/// Parameter metadata that will be rendered to OpenAPI.
+pub(super) struct OpenApiParameterData {
+    pub(super) name: &'static str,
+    pub(super) location: &'static str,
+    pub(super) description: &'static str,
+    pub(super) required: bool,
+    pub(super) schema: serde_json::Value,
 }
 
 /// Response metadata that will be rendered to OpenAPI.
@@ -69,6 +79,8 @@ struct PathItem {
 #[derive(Serialize)]
 struct Operation {
     summary: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    parameters: Vec<OpenApiParameter>,
     responses: BTreeMap<String, OpenApiResponse>,
     #[serde(rename = "requestBody", skip_serializing_if = "Option::is_none")]
     request_body: Option<OpenApiRequestBody>,
@@ -97,6 +109,16 @@ struct OpenApiContent {
 
 #[derive(Serialize)]
 struct OpenApiMediaType {
+    schema: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct OpenApiParameter {
+    name: &'static str,
+    #[serde(rename = "in")]
+    location: &'static str,
+    description: &'static str,
+    required: bool,
     schema: serde_json::Value,
 }
 
@@ -155,6 +177,17 @@ fn render_path(path_data: OpenApiPathData) -> PathItem {
 fn render_operation(operation: OpenApiOperationData) -> Operation {
     Operation {
         summary: operation.summary,
+        parameters: operation
+            .parameters
+            .into_iter()
+            .map(|parameter| OpenApiParameter {
+                name: parameter.name,
+                location: parameter.location,
+                description: parameter.description,
+                required: parameter.required,
+                schema: parameter.schema,
+            })
+            .collect(),
         responses: operation
             .responses
             .into_iter()

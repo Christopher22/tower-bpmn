@@ -12,17 +12,23 @@ use serde::Serialize;
 use super::{
     error::Error,
     json_response,
-    openapi::{OpenApiOperationData, OpenApiPathData, OpenApiResponseData, OpenApiRouteData},
+    openapi::{
+        OpenApiOperationData, OpenApiParameterData, OpenApiPathData, OpenApiResponseData,
+        OpenApiRouteData,
+    },
 };
 use crate::bpmn::{
     ExtendedExecutor, Instance, InstanceId, Instances, MetaData, ProcessName, RegisteredProcess,
     Runtime, Step, StorageBackend,
-    messages::{Context, Participant},
+    messages::{Context, CorrelationKey, Message, MessageError, Participant},
 };
 
 type GetCallback<E, B> =
     dyn Fn(&Runtime<E, B>, &Context) -> Result<serde_json::Value, Error> + Send + Sync;
 type PostCallback<E, B> = dyn Fn(&Runtime<E, B>, serde_json::Value, &Context) -> Result<serde_json::Value, Error>
+    + Send
+    + Sync;
+type PostPathCallback<E, B> = dyn Fn(&Runtime<E, B>, &str, serde_json::Value, &Context) -> Result<serde_json::Value, Error>
     + Send
     + Sync;
 
@@ -70,10 +76,33 @@ impl ResponseDoc {
     }
 }
 
+/// Route-local operation parameter documentation.
+#[derive(Clone)]
+struct ParameterDoc {
+    name: &'static str,
+    location: &'static str,
+    description: &'static str,
+    required: bool,
+    schema: SchemaDoc,
+}
+
+impl ParameterDoc {
+    fn path(name: &'static str, description: &'static str, schema: SchemaDoc) -> Self {
+        Self {
+            name,
+            location: "path",
+            description,
+            required: true,
+            schema,
+        }
+    }
+}
+
 /// Route-local operation documentation.
 #[derive(Clone)]
 pub(super) struct OperationDoc {
     summary: &'static str,
+    parameters: Vec<ParameterDoc>,
     request_body: Option<SchemaDoc>,
     responses: BTreeMap<u16, ResponseDoc>,
 }
@@ -81,11 +110,13 @@ pub(super) struct OperationDoc {
 impl OperationDoc {
     fn new(
         summary: &'static str,
+        parameters: impl IntoIterator<Item = ParameterDoc>,
         request_body: Option<SchemaDoc>,
         responses: impl IntoIterator<Item = (StatusCode, ResponseDoc)>,
     ) -> Self {
         Self {
             summary,
+            parameters: parameters.into_iter().collect(),
             request_body,
             // We normalize status keys once so rendered OpenAPI output stays stable.
             responses: responses
@@ -93,6 +124,13 @@ impl OperationDoc {
                 .map(|(status, response)| (status.as_u16(), response))
                 .collect(),
         }
+    }
+
+    fn path_parameter_name(&self) -> Option<&'static str> {
+        self.parameters
+            .iter()
+            .find(|parameter| parameter.location == "path")
+            .map(|parameter| parameter.name)
     }
 }
 
@@ -139,9 +177,15 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> GetHandler<E, B> {
 
 #[derive(Clone)]
 struct PostHandler<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
-    callback: Arc<PostCallback<E, B>>,
+    callback: PostHandlerCallback<E, B>,
     status: StatusCode,
     participant: Participant,
+}
+
+#[derive(Clone)]
+enum PostHandlerCallback<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
+    Static(Arc<PostCallback<E, B>>),
+    PathSegment(Arc<PostPathCallback<E, B>>),
 }
 
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> PostHandler<E, B> {
@@ -153,7 +197,26 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> PostHandler<E, B> {
             + 'static,
     {
         Self {
-            callback: Arc::new(callback),
+            callback: PostHandlerCallback::Static(Arc::new(callback)),
+            status,
+            participant,
+        }
+    }
+
+    fn json_with_path_segment<F>(status: StatusCode, callback: F, participant: Participant) -> Self
+    where
+        F: Fn(
+                &Runtime<E, B>,
+                &str,
+                serde_json::Value,
+                &Context,
+            ) -> Result<serde_json::Value, Error>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            callback: PostHandlerCallback::PathSegment(Arc::new(callback)),
             status,
             participant,
         }
@@ -220,6 +283,31 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Method<E, B> {
         self.doc.post = doc;
     }
 
+    fn set_post_json_with_path_segment<F>(
+        &mut self,
+        status: StatusCode,
+        callback: F,
+        participant: Participant,
+        doc: Option<OperationDoc>,
+    ) where
+        F: Fn(
+                &Runtime<E, B>,
+                &str,
+                serde_json::Value,
+                &Context,
+            ) -> Result<serde_json::Value, Error>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.post = Some(PostHandler::json_with_path_segment(
+            status,
+            callback,
+            participant,
+        ));
+        self.doc.post = doc;
+    }
+
     fn to_openapi_path_data(
         &self,
         components: &mut BTreeMap<String, serde_json::Value>,
@@ -246,12 +334,34 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Method<E, B> {
         }
     }
 
+    fn openapi_path_parameter_name(&self) -> Option<&'static str> {
+        let get_parameter = self
+            .doc
+            .get
+            .as_ref()
+            .and_then(OperationDoc::path_parameter_name);
+        let post_parameter = self
+            .doc
+            .post
+            .as_ref()
+            .and_then(OperationDoc::path_parameter_name);
+
+        match (get_parameter, post_parameter) {
+            (Some(left), Some(right)) if left != right => {
+                panic!("fallback route methods must agree on path parameter name")
+            }
+            (Some(name), _) | (_, Some(name)) => Some(name),
+            (None, None) => None,
+        }
+    }
+
     async fn execute<Bo: http_body::Body + Send + 'static>(
         &self,
         method: HttpMethod,
         body: Bo,
         runtime: &RwLock<Runtime<E, B>>,
         context: &Context,
+        path_segment: Option<&str>,
     ) -> Result<http::Response<String>, Error>
     where
         Bo::Data: bytes::Buf + Send,
@@ -283,7 +393,16 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Method<E, B> {
                 let payload = parse_json_body(body).await?;
                 let value = {
                     let runtime = runtime.read();
-                    (handler.callback)(&runtime, payload, context)?
+                    match &handler.callback {
+                        PostHandlerCallback::Static(callback) => {
+                            callback(&runtime, payload, context)?
+                        }
+                        PostHandlerCallback::PathSegment(callback) => {
+                            let segment =
+                                path_segment.ok_or_else(|| Error::not_found("route not found"))?;
+                            callback(&runtime, segment, payload, context)?
+                        }
+                    }
                 };
                 Ok(json_response(handler.status, &value))
             }
@@ -324,14 +443,18 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Route<E, B> {
         Bo::Error: std::fmt::Display,
     {
         let mut current = self;
-        for segment in path {
+        for (index, segment) in path.iter().enumerate() {
             if let Some(next) = current.subpages.get(*segment) {
                 current = next;
                 continue;
             }
 
-            if let Some(fallback) = &current.fallback {
-                return fallback.execute(method, body, runtime, context).await;
+            if index + 1 == path.len() {
+                if let Some(fallback) = &current.fallback {
+                    return fallback
+                        .execute(method, body, runtime, context, Some(segment))
+                        .await;
+                }
             }
 
             return Err(Error::not_found("route not found"));
@@ -339,7 +462,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Route<E, B> {
 
         current
             .methods
-            .execute(method, body, runtime, context)
+            .execute(method, body, runtime, context, None)
             .await
     }
 
@@ -359,6 +482,20 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Route<E, B> {
                 current_path
             };
             data.paths.insert(normalized.to_string(), path_data);
+        }
+
+        if let Some(fallback) = self.fallback.as_ref() {
+            if let Some(path_data) = fallback.to_openapi_path_data(&mut data.components) {
+                let path_parameter_name = fallback
+                    .openapi_path_parameter_name()
+                    .expect("documented fallback routes must define a path parameter");
+                let normalized = if current_path.is_empty() {
+                    format!("/{{{path_parameter_name}}}")
+                } else {
+                    format!("{current_path}/{{{path_parameter_name}}}")
+                };
+                data.paths.insert(normalized, path_data);
+            }
         }
 
         // For stable OpenAPI output we render children in lexical order, even with HashMap storage.
@@ -525,6 +662,30 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RouteBuilder<E, B> {
             .set_post_json(status, callback, participant, Some(doc));
     }
 
+    /// Registers a documented JSON POST endpoint using one dynamic final path segment.
+    pub(super) fn add_post_json_doc_with_path_segment<F>(
+        &mut self,
+        path: &str,
+        participant: Participant,
+        status: StatusCode,
+        callback: F,
+        doc: OperationDoc,
+    ) where
+        F: Fn(
+                &Runtime<E, B>,
+                &str,
+                serde_json::Value,
+                &Context,
+            ) -> Result<serde_json::Value, Error>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let node = self.route_mut(path);
+        let fallback = node.fallback.get_or_insert_with(Method::default);
+        fallback.set_post_json_with_path_segment(status, callback, participant, Some(doc));
+    }
+
     /// Finalizes the route tree.
     pub(super) fn build(self) -> Route<E, B> {
         self.root
@@ -560,6 +721,7 @@ pub(super) fn register_runtime_routes<E: ExtendedExecutor<B::Storage>, B: Storag
         },
         OperationDoc::new(
             "List registered processes",
+            [],
             None,
             [(
                 StatusCode::OK,
@@ -576,10 +738,23 @@ pub(super) fn register_runtime_routes<E: ExtendedExecutor<B::Storage>, B: Storag
         let start_type = process.steps.start();
         register_process_instance_routes(
             routes,
-            process_name,
+            process_name.clone(),
             start_type.as_ref().expected_participant.clone(),
             start_type.as_ref().schema.as_value(),
         );
+
+        for external_step in process.steps.external_steps() {
+            let Some(step) = process.steps.get(external_step.name.as_str()) else {
+                continue;
+            };
+            register_external_step_message_route(
+                routes,
+                process_name.clone(),
+                step,
+                external_step.expected_participant.clone(),
+                external_step.schema.as_value(),
+            );
+        }
     }
 }
 
@@ -595,6 +770,7 @@ pub(super) fn register_openapi_root<E: ExtendedExecutor<B::Storage>, B: StorageB
         move |_, _| Ok(openapi_document.clone()),
         OperationDoc::new(
             "Get OpenAPI document",
+            [],
             None,
             [(
                 StatusCode::OK,
@@ -630,6 +806,7 @@ fn register_process_instance_routes<E: ExtendedExecutor<B::Storage>, B: StorageB
             },
             OperationDoc::new(
                 "List process instances",
+                [],
                 None,
                 [
                     (
@@ -663,6 +840,7 @@ fn register_process_instance_routes<E: ExtendedExecutor<B::Storage>, B: StorageB
             },
             OperationDoc::new(
                 "Start process instance",
+                [],
                 // The process input schema is attached at route registration time.
                 Some(SchemaDoc::inline(schema)),
                 [
@@ -689,6 +867,97 @@ fn register_process_instance_routes<E: ExtendedExecutor<B::Storage>, B: StorageB
     }
 }
 
+fn register_external_step_message_route<E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
+    routes: &mut RouteBuilder<E, B>,
+    process_name: ProcessName,
+    step: Step,
+    participant: Participant,
+    input_schema: &serde_json::Value,
+) {
+    let step_name = step.as_str().to_string();
+    let base_path = format!("/processes/{process_name}/steps/{step_name}");
+    let schema = input_schema.clone();
+
+    routes.add_post_json_doc_with_path_segment(
+        &base_path,
+        participant,
+        StatusCode::ACCEPTED,
+        move |runtime, correlation_key, payload, context| {
+            let correlation_key: CorrelationKey = correlation_key.parse()?;
+            let mut delivered = false;
+
+            for target_process in std::iter::once(process_name.clone()).chain(
+                runtime
+                    .registered_processes()
+                    .map(|process| ProcessName::from(&process.meta_data)),
+            ) {
+                let mut message = Message::for_waiting_step(
+                    target_process,
+                    step.clone(),
+                    payload.clone(),
+                    correlation_key,
+                );
+                message.context = context.clone();
+
+                match runtime.messages.send(message) {
+                    Ok(Ok(())) => {
+                        delivered = true;
+                        break;
+                    }
+                    Ok(Err(MessageError::NoTarget)) | Err(MessageError::NoTarget) => {}
+                    Ok(Err(error)) => return Err(error.into()),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+
+            if !delivered {
+                return Err(Error::conflict("no target for this message"));
+            }
+
+            Ok(serde_json::json!({ "status": "accepted" }))
+        },
+        OperationDoc::new(
+            "Send message to waiting step",
+            [ParameterDoc::path(
+                "correlation_key",
+                "Correlation key used to match a waiting process instance",
+                SchemaDoc::component::<CorrelationKey>("CorrelationKey"),
+            )],
+            Some(SchemaDoc::inline(schema)),
+            [
+                (
+                    StatusCode::ACCEPTED,
+                    ResponseDoc::new(
+                        "Message accepted",
+                        SchemaDoc::inline(
+                            schemars::json_schema!({
+                                "type": "object",
+                                "properties": {
+                                    "status": { "type": "string" }
+                                },
+                                "required": ["status"]
+                            })
+                            .into(),
+                        ),
+                    ),
+                ),
+                (
+                    StatusCode::BAD_REQUEST,
+                    ResponseDoc::new("Invalid request", SchemaDoc::from_component("Error")),
+                ),
+                (
+                    StatusCode::FORBIDDEN,
+                    ResponseDoc::new("Forbidden", SchemaDoc::from_component("Error")),
+                ),
+                (
+                    StatusCode::CONFLICT,
+                    ResponseDoc::new("No waiting target", SchemaDoc::from_component("Error")),
+                ),
+            ],
+        ),
+    );
+}
+
 fn operation_to_openapi(
     operation: &OperationDoc,
     participant: &Participant,
@@ -696,6 +965,17 @@ fn operation_to_openapi(
 ) -> OpenApiOperationData {
     OpenApiOperationData {
         summary: operation.summary,
+        parameters: operation
+            .parameters
+            .iter()
+            .map(|parameter| OpenApiParameterData {
+                name: parameter.name,
+                location: parameter.location,
+                description: parameter.description,
+                required: parameter.required,
+                schema: materialize_schema(&parameter.schema, components),
+            })
+            .collect(),
         request_body: operation
             .request_body
             .as_ref()
