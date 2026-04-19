@@ -1,6 +1,6 @@
 use tower_bpmn::bpmn::{
     IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Step, Token,
-    messages::{CorrelationKey, Message},
+    messages::{CorrelationKey, Entity, Message},
     storage::{InMemory, Storage},
 };
 
@@ -128,10 +128,10 @@ async fn throw_then_catch_message_event_with_correlation() {
 
     let key = CorrelationKey::new();
     let thrower = runtime
-        .run(ThrowMessageProcess, (key, 14))
+        .run(ThrowMessageProcess, Entity::SYSTEM, (key, 14))
         .expect("thrower instance must start");
     let waiter = runtime
-        .run(WaitForMessageProcess, key)
+        .run(WaitForMessageProcess, Entity::SYSTEM, key)
         .expect("waiter instance must start");
 
     let thrower_token = runtime
@@ -160,10 +160,10 @@ async fn correlation_keys_isolate_parallel_message_instances() {
     let key_b = CorrelationKey::new();
 
     let waiter_a = runtime
-        .run(WaitForMessageProcess, key_a)
+        .run(WaitForMessageProcess, Entity::SYSTEM, key_a)
         .expect("first waiter instance must start");
     let waiter_b = runtime
-        .run(WaitForMessageProcess, key_b)
+        .run(WaitForMessageProcess, Entity::SYSTEM, key_b)
         .expect("second waiter instance must start");
 
     runtime
@@ -192,7 +192,7 @@ async fn parallel_gateway_join_produces_combined_data_object() {
         .expect("parallel process registration must succeed");
 
     let instance = runtime
-        .run(ParallelAggregationProcess, 3)
+        .run(ParallelAggregationProcess, Entity::SYSTEM, 3)
         .expect("parallel process instance must start");
     let token = runtime
         .wait_for_completion(&ParallelAggregationProcess, instance)

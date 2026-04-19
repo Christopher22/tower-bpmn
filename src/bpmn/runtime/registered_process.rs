@@ -2,11 +2,11 @@ use std::{any::TypeId, sync::Arc};
 
 use serde::Serialize;
 
-use super::super::{
+use crate::bpmn::{
     BpmnStep, ExtendedExecutor, MetaData, Process, ProcessBuilder, ProcessError, ProcessName,
-    State, Step, Steps, Token, Value, storage::StorageBackend,
+    State, Step, Steps, Token, Value, messages::Entity, runtime::DynamicInput,
+    storage::StorageBackend,
 };
-use super::DynamicInput;
 use crate::petri_net::{FirstCompetingStrategy, Id, PetriNet, Place, Simulation};
 
 type PetriNetRef<S> = Arc<PetriNet<BpmnStep<S>, State<S>>>;
@@ -61,13 +61,14 @@ impl<B: StorageBackend> RegisteredProcess<B> {
         &self,
         executor: A,
         input: V,
+        owner: Entity,
         shared_storage: B::Storage,
     ) -> Simulation<A, FirstCompetingStrategy, BpmnStep<B::Storage>, State<B::Storage>> {
         assert!(
             self.input.input.matches::<V>(),
             "The input type does not match the expected type for this process"
         );
-        let token = Token::new(shared_storage).set_output(self.steps.start().into(), input);
+        let token = Token::new(owner, shared_storage).set_output(self.steps.start().into(), input);
         let mut simulation =
             Simulation::new(executor, self.petri_net.clone(), FirstCompetingStrategy);
         simulation[self.start] = State::Completed(token);

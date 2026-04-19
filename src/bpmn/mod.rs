@@ -24,6 +24,8 @@ pub use self::runtime::{
 pub use self::steps::{ExternalStep, ExternalStepData, Step, Steps, Type};
 pub use self::waitable::{IncomingMessage, Timer, Waitable};
 
+pub(crate) use self::runtime::DynValue;
+
 use self::storage::Storage;
 
 /// Executor abstraction required by the BPMN runtime.

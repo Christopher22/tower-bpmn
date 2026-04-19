@@ -2,30 +2,74 @@ use std::collections::HashSet;
 use std::hash::Hash;
 use std::{borrow::Cow, sync::Arc};
 
+/// A sppecific entity of a process, such as a specific person.
+/// In geenral, that corresponds to the individual responsible.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
 )]
+#[serde(transparent)]
+pub struct Entity(Cow<'static, str>);
+
+impl Entity {
+    /// A generic entity representing the system itself, which is used for system-generated messages and tasks.
+    pub const SYSTEM: Self = Self::new("SYSTEM");
+
+    /// Creates a new entity with the given name.
+    pub const fn new(name: &'static str) -> Self {
+        Entity(Cow::Borrowed(name))
+    }
+}
+
+impl std::fmt::Display for Entity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A specific role which may be fulfilled by different entities, such as 'Chef' or 'Admin'.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
+#[serde(transparent)]
+pub struct Role(Cow<'static, str>);
+
+impl Role {
+    /// Creates a new role with the given name.
+    pub const fn new(name: &'static str) -> Self {
+        Role(Cow::Borrowed(name))
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// A participant in a BPMN process, which can be used for assigning tasks and sending messages to specific entities or roles.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
 pub enum Participant {
     /// No specific participant which could be used to deactivate processes.
     Nobody,
     /// A specific entity, such as a department.
-    Entity(Cow<'static, str>),
+    Entity(Entity),
     /// A role, like a chef.
-    Role(Cow<'static, str>),
+    Role(Role),
     /// A generic participant representing everyone.
     Everyone,
 }
 
-impl Participant {
-    /// Creates a participant representing a specific entity.
-    pub const fn entity(name: &'static str) -> Self {
-        Participant::Entity(Cow::Borrowed(name))
+impl From<Entity> for Participant {
+    fn from(value: Entity) -> Self {
+        Participant::Entity(value)
     }
+}
 
-    /// Creates a participant representing a specific role.
-    pub const fn role(name: &'static str) -> Self {
-        Participant::Role(Cow::Borrowed(name))
+impl From<Role> for Participant {
+    fn from(value: Role) -> Self {
+        Participant::Role(value)
     }
 }
 
@@ -34,6 +78,18 @@ impl Participant {
 pub struct Context(Arc<HashSet<Participant>>);
 
 impl Context {
+    /// Creates a context for the system, which is used for system-generated messages and tasks.
+    pub fn system() -> Self {
+        Context(Arc::new(HashSet::from([Participant::Entity(
+            Entity::SYSTEM,
+        )])))
+    }
+
+    /// Creates a context for a specific entity.
+    pub fn for_entity(entity: Entity) -> Self {
+        Context(Arc::new(HashSet::from([Participant::Entity(entity)])))
+    }
+
     /// Creates a context matching the given participant, if it is not 'Nobody'.
     pub fn new_matching(participant: Participant) -> Option<Self> {
         match participant {
@@ -52,6 +108,20 @@ impl Context {
             _ => self.0.iter().any(|p| p == participant),
         }
     }
+
+    /// Try to extract the responsible entity from the context, if there is exactly one entity.
+    pub fn responsible_entity(&self) -> Option<&Entity> {
+        let mut entities = self.0.iter().filter_map(|p| match p {
+            Participant::Entity(e) => Some(e),
+            _ => None,
+        });
+        let first = entities.next()?;
+        if entities.next().is_none() {
+            Some(first)
+        } else {
+            None
+        }
+    }
 }
 
 impl FromIterator<Participant> for Context {
@@ -61,12 +131,6 @@ impl FromIterator<Participant> for Context {
                 .filter(|value| value != &Participant::Nobody && value != &Participant::Everyone)
                 .collect(),
         ))
-    }
-}
-
-impl Default for Context {
-    fn default() -> Self {
-        Context(Arc::new(HashSet::new()))
     }
 }
 
@@ -82,17 +146,17 @@ mod tests {
     #[test]
     fn test_participant_constructors() {
         // Test if the const constructors create the expected variants with correct names
-        let entity = Participant::entity("DevDept");
-        let role = Participant::role("Admin");
+        let entity = Participant::Entity(Entity::new("DevDept"));
+        let role = Participant::Role(Role::new("Admin"));
 
-        assert_eq!(entity, Participant::Entity(Cow::Borrowed("DevDept")));
-        assert_eq!(role, Participant::Role(Cow::Borrowed("Admin")));
+        assert_eq!(entity, Participant::Entity(Entity::new("DevDept")));
+        assert_eq!(role, Participant::Role(Role::new("Admin")));
     }
 
     #[test]
     fn test_context_default() {
-        let ctx = Context::default();
-        let dev_role = Participant::role("Developer");
+        let ctx = Context::system();
+        let dev_role = Participant::Role(Role::new("Developer"));
 
         // A default context is empty.
         // It should not match a specific role, but still match 'Everyone'.
@@ -115,10 +179,10 @@ mod tests {
         // The FromIterator implementation should filter out 'Nobody' and 'Everyone'
         // from the internal HashSet because they are handled by logic, not by presence.
         let participants = vec![
-            Participant::role("Chef"),
+            Participant::Role(Role::new("Chef")),
             Participant::Everyone,
             Participant::Nobody,
-            Participant::entity("Kitchen"),
+            Participant::Entity(Entity::new("Kitchen")),
         ];
 
         let ctx: Context = participants.into_iter().collect();
@@ -131,14 +195,14 @@ mod tests {
         );
 
         // Verify suitability
-        assert!(ctx.is_suitable_for(&Participant::role("Chef")));
-        assert!(ctx.is_suitable_for(&Participant::entity("Kitchen")));
+        assert!(ctx.is_suitable_for(&Participant::Role(Role::new("Chef"))));
+        assert!(ctx.is_suitable_for(&Participant::Entity(Entity::new("Kitchen"))));
     }
 
     #[test]
     fn test_suitability_edge_cases() {
-        let chef = Participant::role("Chef");
-        let waiter = Participant::role("Waiter");
+        let chef = Participant::Role(Role::new("Chef"));
+        let waiter = Participant::Role(Role::new("Waiter"));
         let ctx = make_context(std::slice::from_ref(&chef));
 
         // 1. Participant::Everyone: Always returns true regardless of context content
@@ -170,11 +234,11 @@ mod tests {
     fn test_cow_string_matching() {
         // Test if owned strings and borrowed strings match correctly within the context
         let role_name = "Manager".to_string();
-        let ctx = make_context(&[Participant::Role(Cow::Owned(role_name))]);
+        let ctx = make_context(&[Participant::Role(Role(Cow::Owned(role_name)))]);
 
         // Check against a borrowed version
         assert!(
-            ctx.is_suitable_for(&Participant::role("Manager")),
+            ctx.is_suitable_for(&Participant::Role(Role::new("Manager"))),
             "Owned strings in context should match borrowed strings in queries"
         );
     }
@@ -184,13 +248,16 @@ mod tests {
         // Creating a context from an empty iterator should result in an empty set
         let ctx: Context = std::iter::empty::<Participant>().collect();
         assert_eq!(ctx.0.len(), 0);
-        assert!(!ctx.is_suitable_for(&Participant::role("Any")));
+        assert!(!ctx.is_suitable_for(&Participant::Role(Role::new("Any"))));
     }
 
     #[test]
     fn test_duplicate_participants() {
         // HashSets handle duplicates automatically
-        let ctx = make_context(&[Participant::role("Admin"), Participant::role("Admin")]);
+        let ctx = make_context(&[
+            Participant::Role(Role::new("Admin")),
+            Participant::Role(Role::new("Admin")),
+        ]);
 
         assert_eq!(
             ctx.0.len(),

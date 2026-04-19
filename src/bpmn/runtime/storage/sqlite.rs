@@ -5,9 +5,11 @@ use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value as JsonValue;
 
-use super::super::super::{ProcessName, Step, Steps};
-use super::super::{InstanceId, RegisteredProcess, Token, TokenId, Value};
-use super::{ResumableProcess, Storage, StorageBackend, StorageError};
+use crate::bpmn::{
+    InstanceId, ProcessName, RegisteredProcess, Step, Steps, Token, TokenId, Value,
+    messages::Entity,
+    storage::{ResumableProcess, Storage, StorageBackend, StorageError},
+};
 
 /// Errors emitted while opening or preparing SQLite storage.
 #[derive(Debug)]
@@ -71,48 +73,54 @@ impl Sqlite {
     fn init_schema(connection: &Connection) -> rusqlite::Result<()> {
         connection.execute_batch(
             "
-			CREATE TABLE IF NOT EXISTS processes (
-				id INTEGER PRIMARY KEY,
-				name TEXT NOT NULL,
-				version INTEGER NOT NULL,
-				UNIQUE(name, version)
-			);
+            CREATE TABLE IF NOT EXISTS processes (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                UNIQUE(name, version)
+            );
 
-			CREATE TABLE IF NOT EXISTS steps (
-				id INTEGER PRIMARY KEY,
-				process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
-				step_name TEXT NOT NULL,
-				rust_type TEXT,
-				value_schema_json TEXT,
-				UNIQUE(process_id, step_name)
-			);
+            CREATE TABLE IF NOT EXISTS steps (
+                id INTEGER PRIMARY KEY,
+                process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE,
+                step_name TEXT NOT NULL,
+                rust_type TEXT,
+                value_schema_json TEXT,
+                UNIQUE(process_id, step_name)
+            );
 
-			CREATE TABLE IF NOT EXISTS instances (
-				id TEXT PRIMARY KEY,
-				process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE
-			);
+            CREATE TABLE IF NOT EXISTS instances (
+                id TEXT PRIMARY KEY,
+                process_id INTEGER NOT NULL REFERENCES processes(id) ON DELETE CASCADE
+            );
 
-			CREATE TABLE IF NOT EXISTS finished_steps (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				instance_id TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
-				step_id INTEGER NOT NULL REFERENCES steps(id) ON DELETE RESTRICT,
-				token_slot INTEGER NOT NULL,
-				value_json TEXT NOT NULL,
-				CHECK(token_slot >= 0)
-			);
+            CREATE TABLE IF NOT EXISTS entities (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE
+            );
 
-			CREATE INDEX IF NOT EXISTS idx_finished_steps_latest_by_token
-				ON finished_steps(instance_id, token_slot, id DESC);
+            CREATE TABLE IF NOT EXISTS finished_steps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instance_id TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+                step_id INTEGER NOT NULL REFERENCES steps(id) ON DELETE RESTRICT,
+                token_slot INTEGER NOT NULL,
+                value_json TEXT NOT NULL,
+                entity_id INTEGER REFERENCES entities(id) ON DELETE RESTRICT,
+                CHECK(token_slot >= 0)
+            );
 
-			CREATE INDEX IF NOT EXISTS idx_steps_type
-				ON steps(process_id, rust_type);
+            CREATE INDEX IF NOT EXISTS idx_finished_steps_latest_by_token
+                ON finished_steps(instance_id, token_slot, id DESC);
 
-			CREATE INDEX IF NOT EXISTS idx_history_lookup
-				ON finished_steps(instance_id, step_id, token_slot, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_steps_type
+                ON steps(process_id, rust_type);
 
-			CREATE INDEX IF NOT EXISTS idx_history_step
-				ON finished_steps(instance_id, step_id, id DESC);
-			",
+            CREATE INDEX IF NOT EXISTS idx_history_lookup
+                ON finished_steps(instance_id, step_id, token_slot, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_history_step
+                ON finished_steps(instance_id, step_id, id DESC);
+            ",
         )
     }
 
@@ -377,7 +385,7 @@ impl StorageBackend for Sqlite {
                 continue;
             };
 
-            let token = Token::new(storage.clone());
+            let token = Token::new(Entity::SYSTEM, storage.clone());
             storage.assign_resumed_slot(token.id(), token_slot);
             current_state.push((place_id, token));
         }
@@ -598,18 +606,33 @@ impl SqliteStorage {
 }
 
 impl Storage for SqliteStorage {
-    fn add<V: Value>(&self, token_id: TokenId, place: Step, value: V) {
+    fn add<V: Value>(&self, responsible: &Entity, token_id: TokenId, place: Step, value: V) {
         let token_slot = self.token_slot_for(token_id);
         let step_id = self.step_db_id(&place);
         let value_json = serde_json::to_string(&value).expect("value must serialize");
         let schema_type = Self::value_type_key::<V>();
         let schema_json = serde_json::to_string(&schemars::schema_for!(V))
             .expect("schema must serialize to JSON");
+        let entity_name = (responsible != &Entity::SYSTEM).then(|| responsible.to_string());
 
         self.with_connection(|connection| {
             // Write step completion and step metadata enrichment in one transaction
             // to keep type/schema metadata consistent with first data row.
             let tx = connection.transaction()?;
+
+            let entity_id: Option<i64> = if let Some(entity_name) = entity_name.as_deref() {
+                tx.execute(
+                    "INSERT OR IGNORE INTO entities (name) VALUES (?1)",
+                    params![entity_name],
+                )?;
+                Some(tx.query_row(
+                    "SELECT id FROM entities WHERE name = ?1",
+                    params![entity_name],
+                    |row| row.get(0),
+                )?)
+            } else {
+                None
+            };
 
             tx.execute(
                 "
@@ -617,15 +640,17 @@ impl Storage for SqliteStorage {
 					instance_id,
 					step_id,
 					token_slot,
-					value_json
+					value_json,
+					entity_id
 				)
-				VALUES (?1, ?2, ?3, ?4)
+				VALUES (?1, ?2, ?3, ?4, ?5)
 				",
                 params![
                     self.instance_id.to_string(),
                     step_id,
                     token_slot,
                     value_json,
+                    entity_id,
                 ],
             )?;
 
@@ -744,6 +769,80 @@ impl Storage for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_storage_stores_system_entity_as_null() {
+        let storage = SqliteStorage::for_test();
+        let step = storage.steps.get("a").expect("test step must exist");
+        let token_id = Token::new(Entity::SYSTEM, storage.clone()).id();
+
+        storage.add(&Entity::SYSTEM, token_id, step, 13_i32);
+
+        let (entity_id, entity_count): (Option<i64>, i64) = storage.with_connection(|connection| {
+            let entity_id = connection.query_row(
+                "SELECT entity_id FROM finished_steps WHERE instance_id = ?1",
+                params![storage.instance_id.to_string()],
+                |row| row.get(0),
+            )?;
+            let entity_count =
+                connection.query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))?;
+            Ok((entity_id, entity_count))
+        });
+
+        assert_eq!(entity_id, None);
+        assert_eq!(entity_count, 0);
+    }
+
+    #[test]
+    fn sqlite_storage_normalizes_non_system_entities_via_foreign_key() {
+        let storage = SqliteStorage::for_test();
+        let step = storage.steps.get("a").expect("test step must exist");
+        let responsible = Entity::new("Alice");
+        let first_token_id = Token::new(responsible.clone(), storage.clone()).id();
+        let second_token_id = Token::new(responsible.clone(), storage.clone()).id();
+
+        storage.add(&responsible, first_token_id, step.clone(), 13_i32);
+        storage.add(&responsible, second_token_id, step, 21_i32);
+
+        let rows: Vec<(Option<i64>, Option<String>)> = storage.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "
+					SELECT f.entity_id, e.name
+					FROM finished_steps f
+					LEFT JOIN entities e ON e.id = f.entity_id
+					WHERE f.instance_id = ?1
+					ORDER BY f.id ASC
+					",
+            )?;
+            let rows = statement.query_map(params![storage.instance_id.to_string()], |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })?;
+
+            let mut collected = Vec::new();
+            for row in rows {
+                collected.push(row?);
+            }
+            Ok(collected)
+        });
+        let entity_count: i64 = storage.with_connection(|connection| {
+            connection.query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))
+        });
+
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|(entity_id, name)| entity_id.is_some() && name.as_deref() == Some("Alice"))
+        );
+        assert_eq!(rows[0].0, rows[1].0);
+        assert_eq!(entity_count, 1);
+    }
+
+    // ── tests added by user ──────────────────────────────────────────────────
+
     use std::{
         sync::{Arc, Barrier},
         thread,
@@ -751,8 +850,6 @@ mod tests {
 
     use crate::bpmn::{MetaData, Process, ProcessBuilder, Runtime, gateways};
     use crate::executor::TokioExecutor;
-
-    use super::*;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct SqliteDraftProcess;
@@ -808,7 +905,7 @@ mod tests {
     fn sqlite_storage_roundtrip_for_values_and_steps() {
         let steps = Steps::new(["a", "b"].into_iter()).expect("test steps must be valid");
         let storage = SqliteStorage::for_test();
-        let root = Token::new(storage.clone())
+        let root = Token::new(Entity::SYSTEM, storage.clone())
             .set_output(steps.start().into(), 11_i32)
             .set_output(steps.get("a").expect("step a exists"), 22_i32)
             .set_output(steps.get("b").expect("step b exists"), 33_i32);
@@ -897,8 +994,8 @@ mod tests {
             .steps
             .get("identity")
             .expect("identity step must exist");
-        let token_id = Token::new(storage.clone()).id();
-        storage.add(token_id, identity, 13_i32);
+        let token_id = Token::new(Entity::SYSTEM, storage.clone()).id();
+        storage.add(&Entity::SYSTEM, token_id, identity, 13_i32);
 
         let (instances_count, history_count): (i64, i64) = backend.with_connection(|connection| {
             let instances_count = connection.query_row(
@@ -940,9 +1037,9 @@ mod tests {
             .steps
             .get("identity")
             .expect("identity step must exist");
-        let token = Token::new(storage.clone());
-        storage.add(token.id(), identity.clone(), 13_i32);
-        storage.add(token.id(), identity.clone(), 21_i32);
+        let token = Token::new(Entity::SYSTEM, storage.clone());
+        storage.add(&Entity::SYSTEM, token.id(), identity.clone(), 13_i32);
+        storage.add(&Entity::SYSTEM, token.id(), identity.clone(), 21_i32);
 
         let values = backend
             .query(registered, identity, instance_id)
@@ -975,7 +1072,12 @@ mod tests {
             .steps
             .get("identity")
             .expect("identity step must exist");
-        draft_storage.add(Token::new(draft_storage.clone()).id(), draft_step, 11_i32);
+        draft_storage.add(
+            &Entity::SYSTEM,
+            Token::new(Entity::SYSTEM, draft_storage.clone()).id(),
+            draft_step,
+            11_i32,
+        );
 
         let complex_name = ProcessName::from(SqliteComplexProcess.metadata());
         let complex = runtime
@@ -1015,16 +1117,16 @@ mod tests {
             .steps
             .get("identity")
             .expect("identity step must exist");
-        let token_id = Token::new(storage.clone()).id();
+        let token_id = Token::new(Entity::SYSTEM, storage.clone()).id();
 
-        storage.add(token_id, identity, 7_i32);
+        storage.add(&Entity::SYSTEM, token_id, identity, 7_i32);
 
         let unfinished = backend.unfinished_instances();
         assert_eq!(unfinished.len(), 1);
         assert_eq!(unfinished[0].0.to_string(), process_name.to_string());
         assert_eq!(unfinished[0].1, instance_id);
 
-        storage.add(token_id, registered.steps.end(), 9_i32);
+        storage.add(&Entity::SYSTEM, token_id, registered.steps.end(), 9_i32);
         assert!(backend.unfinished_instances().is_empty());
     }
 
@@ -1050,8 +1152,8 @@ mod tests {
             .steps
             .get("identity")
             .expect("identity step must exist");
-        let token_id = Token::new(storage.clone()).id();
-        storage.add(token_id, identity.clone(), 42_i32);
+        let token_id = Token::new(Entity::SYSTEM, storage.clone()).id();
+        storage.add(&Entity::SYSTEM, token_id, identity.clone(), 42_i32);
 
         let resumable = backend
             .resume_instance(registered, instance_id)
@@ -1094,7 +1196,7 @@ mod tests {
             .get("right")
             .expect("right step must exist");
 
-        let seed = Token::new(storage.clone());
+        let seed = Token::new(Entity::SYSTEM, storage.clone());
         let left = seed.fork().set_output(left_step.clone(), 11_i32);
         let right = seed.fork().set_output(right_step.clone(), 22_i32);
 
@@ -1131,11 +1233,11 @@ mod tests {
         assert_eq!(place_names, vec!["left", "right"]);
 
         // Mark only one branch as finished: instance must still be resumable.
-        storage.add(left.id(), registered.steps.end(), ());
+        storage.add(&Entity::SYSTEM, left.id(), registered.steps.end(), ());
         assert_eq!(backend.unfinished_instances().len(), 1);
 
         // Mark second branch as finished: instance disappears from unfinished query.
-        storage.add(right.id(), registered.steps.end(), ());
+        storage.add(&Entity::SYSTEM, right.id(), registered.steps.end(), ());
         assert!(backend.unfinished_instances().is_empty());
     }
 
@@ -1163,7 +1265,7 @@ mod tests {
             .steps
             .get("identity")
             .expect("identity step must exist");
-        let draft_token_id = Token::new(draft_storage.clone()).id();
+        let draft_token_id = Token::new(Entity::SYSTEM, draft_storage.clone()).id();
 
         let complex_name = ProcessName::from(SqliteComplexProcess.metadata());
         let complex = runtime
@@ -1178,20 +1280,20 @@ mod tests {
             .steps
             .get("prepare")
             .expect("prepare step must exist");
-        let complex_token_id = Token::new(complex_storage.clone()).id();
+        let complex_token_id = Token::new(Entity::SYSTEM, complex_storage.clone()).id();
 
         let start = Arc::new(Barrier::new(3));
 
         let draft_start = start.clone();
         let draft_handle = thread::spawn(move || {
             draft_start.wait();
-            draft_storage.add(draft_token_id, draft_step, 11_i32);
+            draft_storage.add(&Entity::SYSTEM, draft_token_id, draft_step, 11_i32);
         });
 
         let complex_start = start.clone();
         let complex_handle = thread::spawn(move || {
             complex_start.wait();
-            complex_storage.add(complex_token_id, complex_step, 22_i32);
+            complex_storage.add(&Entity::SYSTEM, complex_token_id, complex_step, 22_i32);
         });
 
         start.wait();

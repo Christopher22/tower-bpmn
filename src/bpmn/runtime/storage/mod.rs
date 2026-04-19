@@ -5,8 +5,10 @@ mod sqlite;
 
 use serde_json::Value as JsonValue;
 
-use super::super::{ProcessName, State, Step};
-use super::{InstanceId, RegisteredProcess, Token, TokenId, Value};
+use crate::bpmn::{
+    InstanceId, ProcessName, RegisteredProcess, State, Step, Token, TokenId, Value,
+    messages::Entity,
+};
 use crate::petri_net::{Id, Place};
 
 pub use self::in_memory::{InMemory, InMemoryStorage};
@@ -62,7 +64,7 @@ pub struct ResumableProcess<B: StorageBackend> {
 /// A storage for a process instance, which can be used to store token values and other data related to the instance. This is shared between all tokens in the same process instance, allowing them to see each other's values according to their branching history.
 pub trait Storage: 'static + std::fmt::Debug + Clone + Send + Sync + Eq {
     /// Add a new entry to the storage for the given token ID, place, and value.
-    fn add<V: Value>(&self, token_id: TokenId, place: Step, value: V);
+    fn add<V: Value>(&self, responsible: &Entity, token_id: TokenId, place: Step, value: V);
 
     /// Return all the states currently active.
     fn current_places(&self) -> Vec<Step>;

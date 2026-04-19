@@ -2,12 +2,12 @@ use schemars::{JsonSchema, json_schema};
 use serde::{Serialize, ser::SerializeStruct};
 use uuid::Uuid;
 
-use super::super::{BpmnStep, ExtendedExecutor, State, Step};
-use super::{
-    RegisteredProcess, Token, Value,
-    storage::{ResumableProcess, Storage, StorageBackend},
-};
 use crate::{
+    bpmn::{
+        BpmnStep, ExtendedExecutor, RegisteredProcess, State, Step, Token, Value,
+        messages::Entity,
+        storage::{ResumableProcess, Storage, StorageBackend},
+    },
     executor::Executor,
     petri_net::{FirstCompetingStrategy, Id, Place, Simulation},
 };
@@ -61,11 +61,12 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instance<E, B> {
         process: &RegisteredProcess<B>,
         storage_backend: &B,
         executor: E,
+        owner: Entity,
         input: V,
     ) -> Self {
         let id = InstanceId::new();
         let storage = storage_backend.new_instance(process, id);
-        let simulation = process.start(executor.clone(), input, storage.clone());
+        let simulation = process.start(executor.clone(), input, owner, storage.clone());
         let handle = Handle::new(executor.clone(), simulation, process.end);
         Self {
             id,

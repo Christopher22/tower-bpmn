@@ -100,7 +100,7 @@ impl Message<ProcessName, serde_json::Value, ()> {
             target: process_name,
             payload,
             correlation_key: (),
-            context: Context::default(),
+            context: Context::system(),
         }
     }
 }
@@ -117,7 +117,7 @@ impl Message<(ProcessName, Step), serde_json::Value, CorrelationKey> {
             target: (process_name, step),
             payload,
             correlation_key,
-            context: Context::default(),
+            context: Context::system(),
         }
     }
 }
@@ -129,7 +129,7 @@ impl<T, V: Value> Message<T, V, CorrelationKey> {
             target,
             payload,
             correlation_key: CorrelationKey::new(),
-            context: Context::default(),
+            context: Context::system(),
         }
     }
 
@@ -139,7 +139,7 @@ impl<T, V: Value> Message<T, V, CorrelationKey> {
             target,
             payload,
             correlation_key,
-            context: Context::default(),
+            context: Context::system(),
         }
     }
 }

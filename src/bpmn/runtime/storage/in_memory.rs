@@ -7,34 +7,51 @@ use chrono::DateTime;
 use dashmap::DashMap;
 use serde_json::Value as JsonValue;
 
-use super::{
-    InstanceId, ProcessName, RegisteredProcess, ResumableProcess, Step, Storage, StorageBackend,
-    StorageError, TokenId, Value,
+use crate::bpmn::{
+    DynValue, InstanceId, ProcessName, RegisteredProcess, Step, Storage, TokenId, Value,
+    messages::Entity,
+    storage::{ResumableProcess, StorageBackend, StorageError},
 };
 
+/// A stored value after a process finished.
 #[derive(Debug)]
-struct Entry {
-    timestamp: DateTime<chrono::Utc>,
-    place: Step,
+pub struct Entry {
+    pub timestamp: DateTime<chrono::Utc>,
+    pub responsible: Entity,
+    pub place: Step,
     token_id: TokenId,
     /// This is enforced to be a "Value"
-    value: Box<dyn Any + Send + Sync>,
-    serialize_json: fn(&(dyn Any + Send + Sync)) -> JsonValue,
+    value: Box<dyn DynValue>,
+    serialize_json: fn(&dyn Any) -> JsonValue,
 }
 
 impl Entry {
-    fn serialize_json_impl<V: Value>(value: &(dyn Any + Send + Sync)) -> JsonValue {
-        let typed = value.downcast_ref::<V>().expect("checked type");
-        serde_json::to_value(typed).expect("value must serialize")
-    }
-
-    pub fn new<V: Value>(token_id: TokenId, place: Step, value: V) -> Self {
+    pub(crate) fn new<V: Value>(token_id: TokenId, place: Step, owner: Entity, value: V) -> Self {
         Entry {
             timestamp: chrono::Utc::now(),
             place,
             token_id,
+            responsible: owner,
             value: Box::new(value),
             serialize_json: Self::serialize_json_impl::<V>,
+        }
+    }
+
+    fn serialize_json_impl<V: Value>(value: &(dyn Any)) -> JsonValue {
+        let typed = value.downcast_ref::<V>().expect("checked type");
+        serde_json::to_value(typed).expect("value must serialize")
+    }
+}
+
+impl Clone for Entry {
+    fn clone(&self) -> Self {
+        Entry {
+            timestamp: self.timestamp,
+            place: self.place.clone(),
+            token_id: self.token_id,
+            responsible: self.responsible.clone(),
+            value: self.value.clone_box(),
+            serialize_json: self.serialize_json,
         }
     }
 }
@@ -58,6 +75,29 @@ pub struct InMemory(Arc<DashMap<InstanceId, Arc<InstanceState>>>);
 impl Default for InMemory {
     fn default() -> Self {
         InMemory(Arc::new(DashMap::new()))
+    }
+}
+
+impl InMemory {
+    /// Query the full history of a process instance, returning all entries ordered by insertion time.
+    pub fn query_history(&self, instance_id: InstanceId) -> Result<Vec<Entry>, StorageError> {
+        let mut history: Vec<_> = match self.0.get(&instance_id) {
+            Some(instance) => Ok(instance
+                .history
+                .entries
+                .iter()
+                .flat_map(|typed_entries| {
+                    typed_entries
+                        .value()
+                        .iter()
+                        .map(|entry| entry.clone())
+                        .collect::<Vec<_>>()
+                })
+                .collect()),
+            None => Err(StorageError::NotFound),
+        }?;
+        history.sort_by_key(|entry| entry.timestamp);
+        Ok(history)
     }
 }
 
@@ -135,7 +175,7 @@ impl StorageBackend for InMemory {
     }
 }
 
-/// A (shared) history of token values, indexed by type and token id, with timestamps for determining the current value at a given place in the process. This is shared between all tokens in the same process instance, allowing them to see each other's values according to their branching history.
+/// A (shared) history of token values.
 #[derive(Clone)]
 pub struct InMemoryStorage(Arc<RawHistory>);
 
@@ -165,8 +205,8 @@ impl std::fmt::Debug for InMemoryStorage {
 }
 
 impl Storage for InMemoryStorage {
-    fn add<V: Value>(&self, token_id: TokenId, place: Step, value: V) {
-        let data_entry = Entry::new(token_id, place.clone(), value);
+    fn add<V: Value>(&self, responsible: &Entity, token_id: TokenId, place: Step, value: V) {
+        let data_entry = Entry::new(token_id, place.clone(), responsible.clone(), value);
         match self.0.entries.entry(TypeId::of::<V>()) {
             dashmap::Entry::Occupied(mut entry) => {
                 entry.get_mut().push(data_entry);
@@ -193,11 +233,8 @@ impl Storage for InMemoryStorage {
                 .rev()
                 .find(|entry| token_ids.contains(&entry.token_id))
                 .map(|entry| {
-                    entry
-                        .value
-                        .downcast_ref::<T>()
-                        .expect("checked type")
-                        .clone()
+                    let any: &dyn Any = entry.value.as_ref();
+                    any.downcast_ref::<T>().expect("checked type").clone()
                 })
         })
     }
@@ -293,9 +330,9 @@ mod tests {
             .get("identity")
             .expect("identity step must exist");
 
-        let token = Token::new(storage.clone());
-        storage.add(token.id(), step.clone(), 11_i32);
-        storage.add(token.id(), step.clone(), 22_i32);
+        let token = Token::new(Entity::SYSTEM, storage.clone());
+        storage.add(&token.responsible, token.id(), step.clone(), 11_i32);
+        storage.add(&token.responsible, token.id(), step.clone(), 22_i32);
 
         let values = backend
             .query(registered, step, instance_id)
@@ -334,7 +371,12 @@ mod tests {
             .steps
             .get("identity")
             .expect("identity step must exist");
-        storage.add(Token::new(storage.clone()).id(), step, 7_i32);
+        storage.add(
+            &Entity::SYSTEM,
+            Token::new(Entity::SYSTEM, storage.clone()).id(),
+            step,
+            7_i32,
+        );
 
         let other_step = other_registered
             .steps

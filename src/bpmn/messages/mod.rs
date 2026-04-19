@@ -16,7 +16,7 @@ mod participant;
 
 pub use self::broker::{MessageBroker, MessageError};
 pub use self::message::{CorrelationKey, Message};
-pub use self::participant::{Context, Participant};
+pub use self::participant::{Context, Entity, Participant, Role};
 
 #[derive(Debug)]
 struct RawMessage {
@@ -61,14 +61,8 @@ impl<C> MessageMetaData<C> {
     }
 }
 
-impl<C: Default> Default for MessageMetaData<C> {
-    fn default() -> Self {
-        Self::new(C::default(), Context::default())
-    }
-}
-
 /// The callback for spawn a new process instance with a message, which is used for messages that start new process instances.
-type SpawnCallback = dyn Fn(Box<dyn Any + 'static>) -> Result<InstanceId, InstanceSpawnError>
+type SpawnCallback = dyn Fn(Entity, Box<dyn Any + 'static>) -> Result<InstanceId, InstanceSpawnError>
     + 'static
     + Send
     + Sync;
@@ -124,8 +118,8 @@ impl Messages {
     ) {
         self.dynamic_spawn = Some((
             DynamicInput::new::<P::Input>(instances.registered_process.steps.start()),
-            Arc::new(move |value| match value.downcast::<P::Input>() {
-                Ok(input) => Ok(instances.run(*input)),
+            Arc::new(move |entity, value| match value.downcast::<P::Input>() {
+                Ok(input) => Ok(instances.run(entity, *input)),
                 Err(_) => Err(InstanceSpawnError::InvalidInput(
                     "Message payload type does not match process input type".to_string(),
                 )),
@@ -142,6 +136,7 @@ impl Messages {
         &self,
         context: &Context,
         callback: impl FnOnce(
+            Entity,
             &DynamicInput,
             &Arc<SpawnCallback>,
         ) -> Result<InstanceId, InstanceSpawnError>,
@@ -150,7 +145,13 @@ impl Messages {
             if !context.is_suitable_for(&input.expected_participant) {
                 return Err(InstanceSpawnError::InvalidContext);
             }
-            callback(input, instance_spawn)
+            let owner = match context.responsible_entity() {
+                Some(entity) => entity.clone(),
+                None => {
+                    return Err(InstanceSpawnError::InvalidContext);
+                }
+            };
+            callback(owner, input, instance_spawn)
         } else {
             Err(InstanceSpawnError::InvalidContext)
         }
@@ -226,7 +227,9 @@ impl Sendable for DynamicValue {
     type Result = Result<InstanceId, InstanceSpawnError>;
 
     fn send(self, messages: &Messages) -> Self::Result {
-        messages.try_spawn(&Context::default(), |_, spawner| spawner(self.to_box()))
+        messages.try_spawn(&Context::system(), |owner, _, spawner| {
+            spawner(owner, self.to_box())
+        })
     }
 }
 
@@ -234,13 +237,13 @@ impl Sendable for serde_json::Value {
     type Result = Result<InstanceId, InstanceSpawnError>;
 
     fn send(self, messages: &Messages) -> Self::Result {
-        messages.try_spawn(&Context::default(), |dynamic_input, spawner| {
+        messages.try_spawn(&Context::system(), |owner, dynamic_input, spawner| {
             let value = dynamic_input.cast(self).map_err(|_| {
                 InstanceSpawnError::InvalidInput(
                     "Failed to cast JSON value to process input".to_string(),
                 )
             })?;
-            spawner(value.to_box())
+            spawner(owner, value.to_box())
         })
     }
 }
@@ -249,7 +252,9 @@ impl<P: Process> Sendable for Message<P, P::Input, ()> {
     type Result = Result<InstanceId, InstanceSpawnError>;
 
     fn send(self, messages: &Messages) -> Self::Result {
-        messages.try_spawn(&self.context, |_, spawner| spawner(Box::new(self.payload)))
+        messages.try_spawn(&self.context, |owner, _, spawner| {
+            spawner(owner, Box::new(self.payload))
+        })
     }
 }
 
@@ -257,7 +262,9 @@ impl Sendable for Message<ProcessName, DynamicValue, ()> {
     type Result = Result<InstanceId, InstanceSpawnError>;
 
     fn send(self, messages: &Messages) -> Self::Result {
-        messages.try_spawn(&self.context, |_, spawner| spawner(self.payload.to_box()))
+        messages.try_spawn(&self.context, |owner, _, spawner| {
+            spawner(owner, self.payload.to_box())
+        })
     }
 }
 
@@ -265,13 +272,13 @@ impl Sendable for Message<ProcessName, serde_json::Value, ()> {
     type Result = Result<InstanceId, InstanceSpawnError>;
 
     fn send(self, messages: &Messages) -> Self::Result {
-        messages.try_spawn(&self.context, |dynamic_input, spawner| {
+        messages.try_spawn(&self.context, |owner, dynamic_input, spawner| {
             let value = dynamic_input.cast(self.payload).map_err(|_| {
                 InstanceSpawnError::InvalidInput(
                     "Failed to cast JSON value to process input".to_string(),
                 )
             })?;
-            spawner(value.to_box())
+            spawner(owner, value.to_box())
         })
     }
 }

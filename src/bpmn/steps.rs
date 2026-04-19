@@ -628,7 +628,7 @@ mod tests {
 
     #[test]
     fn test_external_step_creation() {
-        let participant = Participant::entity("User1");
+        let participant = Participant::Entity(crate::bpmn::messages::Entity::new("User1"));
         let step = ExternalStepData::new::<DummyValue>("ExternalTask", participant.clone());
 
         assert_eq!(step.name, "ExternalTask");
@@ -655,7 +655,7 @@ mod tests {
         let builder = StepsBuilder::default();
         builder.add_start::<()>(Participant::Everyone).unwrap();
 
-        let participant = Participant::entity("UserX");
+        let participant = Participant::Entity(crate::bpmn::messages::Entity::new("UserX"));
         let ext = ExternalStepData::new::<DummyValue>("External", participant.clone());
 
         builder.add_external::<DummyValue>(ext.clone()).unwrap();
@@ -694,7 +694,7 @@ mod tests {
 
     #[test]
     fn test_step_as_external_some() {
-        let participant = Participant::entity("User1");
+        let participant = Participant::Entity(crate::bpmn::messages::Entity::new("User1"));
         let ext = ExternalStepData::new::<DummyValue>("Ext", participant.clone());
 
         let builder = StepsBuilder::default();
@@ -717,7 +717,7 @@ mod tests {
         builder
             .add_external::<DummyValue>(ExternalStepData::new::<DummyValue>(
                 "B",
-                Participant::entity("User1"),
+                Participant::Entity(crate::bpmn::messages::Entity::new("User1")),
             ))
             .unwrap();
         builder.add_end(Type::new::<()>());

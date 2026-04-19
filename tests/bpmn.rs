@@ -1,7 +1,7 @@
 use std::time::Duration;
 use tower_bpmn::bpmn::{
     IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Step, Token,
-    messages::{Context, CorrelationKey, Message},
+    messages::{Context, CorrelationKey, Entity, Message},
     storage::{InMemory, Storage},
 };
 
@@ -302,7 +302,7 @@ async fn test_engine_registry_allows_multiple_registrations() {
 async fn test_unregistered_process_fails_to_start() {
     let runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     // Intentionally skipping registration
-    let result = runtime.run(SimpleSequentialProcess, 10);
+    let result = runtime.run(SimpleSequentialProcess, Entity::SYSTEM, 10);
     assert!(
         result.is_err(),
         "Engine should reject running unregistered processes to maintain strict registry integrity."
@@ -316,7 +316,9 @@ async fn test_sequential_execution_correctness() {
     let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(SimpleSequentialProcess).unwrap();
 
-    let instance = runtime.run(SimpleSequentialProcess, 10).unwrap();
+    let instance = runtime
+        .run(SimpleSequentialProcess, Entity::SYSTEM, 10)
+        .unwrap();
     let token = runtime
         .wait_for_completion(&SimpleSequentialProcess, instance)
         .await
@@ -332,7 +334,9 @@ async fn test_sequential_execution_last_step() {
     let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(SimpleSequentialProcess).unwrap();
 
-    let instance = runtime.run(SimpleSequentialProcess, 0).unwrap();
+    let instance = runtime
+        .run(SimpleSequentialProcess, Entity::SYSTEM, 0)
+        .unwrap();
     let token = runtime
         .wait_for_completion(&SimpleSequentialProcess, instance)
         .await
@@ -347,7 +351,9 @@ async fn test_type_conversion_process() {
     let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(TypeConversionProcess).unwrap();
 
-    let instance = runtime.run(TypeConversionProcess, 404).unwrap();
+    let instance = runtime
+        .run(TypeConversionProcess, Entity::SYSTEM, 404)
+        .unwrap();
     let token = runtime
         .wait_for_completion(&TypeConversionProcess, instance)
         .await
@@ -362,7 +368,9 @@ async fn test_token_get_last() {
     let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(TypeConversionProcess).unwrap();
 
-    let instance = runtime.run(TypeConversionProcess, 200).unwrap();
+    let instance = runtime
+        .run(TypeConversionProcess, Entity::SYSTEM, 200)
+        .unwrap();
     let token = runtime
         .wait_for_completion(&TypeConversionProcess, instance)
         .await
@@ -379,7 +387,7 @@ async fn test_message_target_identity_behavior() {
     let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(MessageTarget).unwrap();
 
-    let instance = runtime.run(MessageTarget, 99).unwrap();
+    let instance = runtime.run(MessageTarget, Entity::SYSTEM, 99).unwrap();
     let token = runtime
         .wait_for_completion(&MessageTarget, instance)
         .await
@@ -399,7 +407,9 @@ async fn test_parallel_gateway_join_produces_combined_data_object() {
         .register_process(ParallelAggregationProcess)
         .unwrap();
 
-    let instance = runtime.run(ParallelAggregationProcess, 3).unwrap();
+    let instance = runtime
+        .run(ParallelAggregationProcess, Entity::SYSTEM, 3)
+        .unwrap();
     let token = runtime
         .wait_for_completion(&ParallelAggregationProcess, instance)
         .await
@@ -417,7 +427,9 @@ async fn test_parallel_aggregation_with_negative_inputs() {
         .register_process(ParallelAggregationProcess)
         .unwrap();
 
-    let instance = runtime.run(ParallelAggregationProcess, -50).unwrap();
+    let instance = runtime
+        .run(ParallelAggregationProcess, Entity::SYSTEM, -50)
+        .unwrap();
     let token = runtime
         .wait_for_completion(&ParallelAggregationProcess, instance)
         .await
@@ -436,7 +448,9 @@ async fn test_multiple_concurrent_parallel_aggregations() {
 
     let mut handles = Vec::new();
     for i in 0..5 {
-        let instance = runtime.run(ParallelAggregationProcess, i).unwrap();
+        let instance = runtime
+            .run(ParallelAggregationProcess, Entity::SYSTEM, i)
+            .unwrap();
         handles.push(runtime.wait_for_completion(&ParallelAggregationProcess, instance));
     }
 
@@ -467,8 +481,12 @@ async fn test_throw_then_catch_message_event_with_correlation() {
     runtime.register_process(WaitForMessageProcess).unwrap();
 
     let key = CorrelationKey::new();
-    let thrower = runtime.run(ThrowMessageProcess, (key, 14)).unwrap();
-    let waiter = runtime.run(WaitForMessageProcess, key).unwrap();
+    let thrower = runtime
+        .run(ThrowMessageProcess, Entity::SYSTEM, (key, 14))
+        .unwrap();
+    let waiter = runtime
+        .run(WaitForMessageProcess, Entity::SYSTEM, key)
+        .unwrap();
 
     let thrower_token = runtime
         .wait_for_completion(&ThrowMessageProcess, thrower)
@@ -493,8 +511,12 @@ async fn test_correlation_keys_isolate_parallel_message_instances() {
     let key_a = CorrelationKey::new();
     let key_b = CorrelationKey::new();
 
-    let waiter_a = runtime.run(WaitForMessageProcess, key_a).unwrap();
-    let waiter_b = runtime.run(WaitForMessageProcess, key_b).unwrap();
+    let waiter_a = runtime
+        .run(WaitForMessageProcess, Entity::SYSTEM, key_a)
+        .unwrap();
+    let waiter_b = runtime
+        .run(WaitForMessageProcess, Entity::SYSTEM, key_b)
+        .unwrap();
 
     runtime
         .messages
@@ -527,7 +549,9 @@ async fn test_message_catch_with_early_send_buffers_correctly() {
         .send(Message::with_key(MessageTarget, 10, key))
         .unwrap();
 
-    let waiter = runtime.run(WaitForMessageProcess, key).unwrap();
+    let waiter = runtime
+        .run(WaitForMessageProcess, Entity::SYSTEM, key)
+        .unwrap();
     let token = runtime
         .wait_for_completion(&WaitForMessageProcess, waiter)
         .await
@@ -543,7 +567,9 @@ async fn test_throw_message_process_payload_extraction() {
     runtime.register_process(ThrowMessageProcess).unwrap();
 
     let key = CorrelationKey::new();
-    let thrower = runtime.run(ThrowMessageProcess, (key, 100)).unwrap();
+    let thrower = runtime
+        .run(ThrowMessageProcess, Entity::SYSTEM, (key, 100))
+        .unwrap();
 
     let token = runtime
         .wait_for_completion(&ThrowMessageProcess, thrower)
@@ -560,7 +586,9 @@ async fn test_wait_for_message_post_processing_logic() {
     runtime.register_process(WaitForMessageProcess).unwrap();
 
     let key = CorrelationKey::new();
-    let waiter = runtime.run(WaitForMessageProcess, key).unwrap();
+    let waiter = runtime
+        .run(WaitForMessageProcess, Entity::SYSTEM, key)
+        .unwrap();
 
     runtime
         .messages
@@ -568,7 +596,7 @@ async fn test_wait_for_message_post_processing_logic() {
             target: MessageTarget,
             payload: 11, // Expect * 3 post-process
             correlation_key: key,
-            context: Context::default(),
+            context: Context::system(),
         })
         .unwrap();
 
@@ -596,9 +624,15 @@ async fn test_complex_concurrent_workflow_orchestration() {
     let key = CorrelationKey::new();
 
     // Kick off 3 completely different instances
-    let thrower = runtime.run(ThrowMessageProcess, (key, 4)).unwrap();
-    let waiter = runtime.run(WaitForMessageProcess, key).unwrap();
-    let parallel = runtime.run(ParallelAggregationProcess, 5).unwrap();
+    let thrower = runtime
+        .run(ThrowMessageProcess, Entity::SYSTEM, (key, 4))
+        .unwrap();
+    let waiter = runtime
+        .run(WaitForMessageProcess, Entity::SYSTEM, key)
+        .unwrap();
+    let parallel = runtime
+        .run(ParallelAggregationProcess, Entity::SYSTEM, 5)
+        .unwrap();
 
     let (throw_t, wait_t, par_t) = tokio::join!(
         runtime.wait_for_completion(&ThrowMessageProcess, thrower),
@@ -621,7 +655,9 @@ async fn test_exclusive_gateway_routes_high_condition() {
     let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(ExclusiveGatewayProcess).unwrap();
 
-    let instance = runtime.run(ExclusiveGatewayProcess, 150).unwrap();
+    let instance = runtime
+        .run(ExclusiveGatewayProcess, Entity::SYSTEM, 150)
+        .unwrap();
     let token = runtime
         .wait_for_completion(&ExclusiveGatewayProcess, instance)
         .await
@@ -637,7 +673,9 @@ async fn test_exclusive_gateway_routes_low_condition() {
     let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(ExclusiveGatewayProcess).unwrap();
 
-    let instance = runtime.run(ExclusiveGatewayProcess, 50).unwrap();
+    let instance = runtime
+        .run(ExclusiveGatewayProcess, Entity::SYSTEM, 50)
+        .unwrap();
     let token = runtime
         .wait_for_completion(&ExclusiveGatewayProcess, instance)
         .await
@@ -656,7 +694,9 @@ async fn test_nested_parallel_gateways_synchronize_correctly() {
     // Inner left: 5+1=6, Inner right: 5+2=7 -> Sum inner: 13
     // Outer right: 5*10=50
     // Final sum: 13 + 50 = 63
-    let instance = runtime.run(NestedGatewayProcess, 5).unwrap();
+    let instance = runtime
+        .run(NestedGatewayProcess, Entity::SYSTEM, 5)
+        .unwrap();
     let token = runtime
         .wait_for_completion(&NestedGatewayProcess, instance)
         .await
@@ -674,7 +714,9 @@ async fn test_process_suspends_and_does_not_terminate_prematurely() {
     runtime.register_process(WaitForMessageProcess).unwrap();
 
     let key = CorrelationKey::new();
-    let waiter = runtime.run(WaitForMessageProcess, key).unwrap();
+    let waiter = runtime
+        .run(WaitForMessageProcess, Entity::SYSTEM, key)
+        .unwrap();
 
     // Wait a brief moment to ensure the engine doesn't falsely complete the process
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -710,7 +752,9 @@ async fn test_engine_state_clears_completed_instances() {
     let mut runtime: Runtime<tower_bpmn::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime.register_process(SimpleSequentialProcess).unwrap(); // Assuming from previous snippet
 
-    let instance = runtime.run(SimpleSequentialProcess, 10).unwrap();
+    let instance = runtime
+        .run(SimpleSequentialProcess, Entity::SYSTEM, 10)
+        .unwrap();
     let _ = runtime
         .wait_for_completion(&SimpleSequentialProcess, instance)
         .await
@@ -740,7 +784,9 @@ async fn test_throw_message_ends_cleanly_after_emission() {
     // Intentionally NOT registering the Wait process.
 
     let key = CorrelationKey::new();
-    let thrower = runtime.run(ThrowMessageProcess, (key, 99)).unwrap();
+    let thrower = runtime
+        .run(ThrowMessageProcess, Entity::SYSTEM, (key, 99))
+        .unwrap();
 
     // The throw process should reach the end of its sequence flow and terminate gracefully
     // even if no one is listening to the message it threw (fire-and-forget behavior).

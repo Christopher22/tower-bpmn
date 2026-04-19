@@ -127,6 +127,13 @@ impl<S: Storage, V: Value, C: Fn(&super::Token<S>, V) -> usize + Clone + Sync + 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct And(pub Cow<'static, str>);
 
+impl And {
+    /// Creates a new AND gateway with the given name.
+    pub const fn new(name: &'static str) -> Self {
+        And(Cow::Borrowed(name))
+    }
+}
+
 impl<S: Storage> Gateway<S> for And {}
 
 impl<S: Storage> SplitableGateway<S> for And {

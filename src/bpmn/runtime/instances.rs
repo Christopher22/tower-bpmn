@@ -1,9 +1,9 @@
 use dashmap::DashMap;
 use serde::ser::{SerializeSeq, SerializeStruct};
 
-use super::super::ExtendedExecutor;
-use super::{
-    Instance, InstanceId, RegisteredProcess, Value,
+use crate::bpmn::{
+    ExtendedExecutor, Instance, InstanceId, RegisteredProcess, Value,
+    messages::Entity,
     storage::{StorageBackend, StorageError},
 };
 
@@ -51,11 +51,12 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Instances<E, B> {
 
     /// Run a new instance. Used internally by the runtime.
     /// This should not be called directly, because the value is not checked and will panic if not match the registered process.
-    pub(crate) fn run<V: Value>(&self, input: V) -> InstanceId {
+    pub(crate) fn run<V: Value>(&self, owner: Entity, input: V) -> InstanceId {
         let instance = Instance::new(
             &self.registered_process,
             &self.storage_backend,
             self.executor.clone(),
+            owner,
             input,
         );
         let id = instance.id;

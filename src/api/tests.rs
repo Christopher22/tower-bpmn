@@ -4,7 +4,7 @@ use tower_service::Service;
 
 use crate::bpmn::{
     IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Token,
-    messages::{Context, CorrelationKey, Participant},
+    messages::{Context, CorrelationKey, Entity, Participant, Role},
     storage::{InMemory, Storage},
 };
 use crate::{Api, Guard, OpenApiSecurityScheme, executor::TokioExecutor};
@@ -78,7 +78,7 @@ impl Process for RestrictedProcess {
     type Input = i32;
     type Output = i32;
 
-    const INITIAL_OWNER: Participant = Participant::role("admin");
+    const INITIAL_OWNER: Participant = Participant::Role(Role::new("admin"));
 
     fn metadata(&self) -> &MetaData {
         static META: MetaData = MetaData::new("restricted-process", "Requires admin context");
@@ -107,7 +107,12 @@ struct RoleGuard;
 
 impl Guard for RoleGuard {
     fn context_from_request(&self, _request: &http::request::Parts) -> Context {
-        std::iter::once(Participant::role("admin")).collect()
+        [
+            Participant::Entity(Entity::new("user123")),
+            Participant::Role(Role::new("admin")),
+        ]
+        .into_iter()
+        .collect()
     }
 }
 
@@ -116,7 +121,7 @@ struct ApiKeyGuard;
 
 impl Guard for ApiKeyGuard {
     fn context_from_request(&self, _request: &http::request::Parts) -> Context {
-        Context::default()
+        Context::for_entity(Entity::new("ApiKeyUser"))
     }
 
     fn openapi_security_scheme(&self) -> Option<OpenApiSecurityScheme> {
@@ -505,7 +510,7 @@ async fn guard_with_nobody_cannot_access_protected_route() {
     .with_guard(NobodyGuard)
     .add_get_json_for(
         "/health",
-        Participant::role("admin"),
+        Participant::Role(Role::new("admin")),
         StatusCode::OK,
         |_, _| Ok(serde_json::json!({"status":"ok"})),
     )

@@ -1,6 +1,6 @@
 use http::request::Parts;
 
-use crate::bpmn::messages::Context;
+use crate::bpmn::messages::{Context, Entity};
 
 /// OpenAPI security scheme configuration provided by a guard.
 #[derive(Debug, Clone)]
@@ -35,12 +35,17 @@ pub trait Guard: std::fmt::Debug + Send + Sync {
     }
 }
 
-/// Default guard that allows every request and returns an everybody context.
+/// Default guard that allows every request.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EverybodyGuard;
 
+impl EverybodyGuard {
+    /// Default entity used for the everybody context.
+    pub const DEFAULT_ENTITY: Entity = Entity::new("Anonymous");
+}
+
 impl Guard for EverybodyGuard {
     fn context_from_request(&self, _request: &Parts) -> Context {
-        Context::default()
+        Context::for_entity(Self::DEFAULT_ENTITY.clone())
     }
 }

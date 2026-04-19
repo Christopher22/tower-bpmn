@@ -4,8 +4,7 @@ use tokio::time::{Duration as TokioDuration, timeout};
 use crate::bpmn::{
     IncomingMessage, InstanceId, InstanceSpawnError, MetaData, Process, Runtime, Timer, Type,
     Waitable, gateways,
-    messages::Message,
-    messages::{CorrelationKey, MessageBroker, MessageError, Participant},
+    messages::{CorrelationKey, Entity, Message, MessageBroker, MessageError, Participant},
     process_builder::ProcessBuilder,
     runtime::Token,
     steps,
@@ -150,7 +149,7 @@ impl Process for WaitingProcess {
 #[test]
 fn runtime_returns_unregistered_error_for_unknown_process() {
     let runtime: Runtime<crate::executor::TokioExecutor, InMemory> = Runtime::default();
-    let result = runtime.run(DummyProcess, 1);
+    let result = runtime.run(DummyProcess, Entity::SYSTEM, 1);
     assert!(matches!(result, Err(InstanceSpawnError::Unregistered)));
 }
 
@@ -166,11 +165,11 @@ async fn timer_waitable_with_past_time_resolves_immediately() {
     let timer = Timer("timer".into());
     let output = <Timer as Waitable<DummyProcess, DateTime<Utc>, ()>>::wait_for(
         &timer,
-        &Token::new(InMemoryStorage::for_test()),
+        &mut Token::new(Entity::SYSTEM, InMemoryStorage::for_test()),
         Utc::now() - Duration::seconds(1),
     )
     .await;
-    let _: () = output;
+    let (_, ()) = output;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -181,7 +180,7 @@ async fn timer_waitable_with_future_time_resolves_with_current_semantics() {
         TokioDuration::from_millis(50),
         <Timer as Waitable<DummyProcess, DateTime<Utc>, ()>>::wait_for(
             &timer,
-            &Token::new(InMemoryStorage::for_test()),
+            &mut Token::new(Entity::SYSTEM, InMemoryStorage::for_test()),
             Utc::now() + Duration::milliseconds(30),
         ),
     )
@@ -214,9 +213,12 @@ async fn incoming_message_waitable_returns_payload() {
     messages.send(message).unwrap();
 
     let value = waitable
-        .wait_for(&Token::new(InMemoryStorage::for_test()), key)
+        .wait_for(
+            &mut Token::new(Entity::SYSTEM, InMemoryStorage::for_test()),
+            key,
+        )
         .await;
-    assert_eq!(value, 77);
+    assert_eq!(value, (Entity::SYSTEM, 77));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -234,7 +236,7 @@ async fn incoming_message_waitable_ignores_other_correlation_keys() {
     let other_message = Message::new(DummyProcess, 11_i32);
 
     let wait_future = waitable.wait_for(
-        &Token::new(InMemoryStorage::for_test()),
+        &mut Token::new(Entity::SYSTEM, InMemoryStorage::for_test()),
         expected_message.correlation_key,
     );
     messages.send(other_message).unwrap();
@@ -243,7 +245,7 @@ async fn incoming_message_waitable_ignores_other_correlation_keys() {
     let value = timeout(TokioDuration::from_secs(1), wait_future)
         .await
         .expect("waitable should resolve for the expected key");
-    assert_eq!(value, 88);
+    assert_eq!(value, (Entity::SYSTEM, 88));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -258,10 +260,10 @@ async fn throw_message_and_wait_for_message_roundtrip() {
 
     let key = CorrelationKey::new();
     let throw_instance: InstanceId = runtime
-        .run(ThrowingProcess, (key, 12))
+        .run(ThrowingProcess, Entity::SYSTEM, (key, 12))
         .expect("throw instance must start");
     let wait_instance = runtime
-        .run(WaitingProcess, key)
+        .run(WaitingProcess, Entity::SYSTEM, key)
         .expect("wait instance must start");
 
     let throw_token = runtime

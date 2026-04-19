@@ -3,31 +3,34 @@ use uuid::Uuid;
 
 use std::any::Any;
 
-use crate::bpmn::{Step, Storage};
+use crate::bpmn::{Step, Storage, messages::Entity};
 
+pub(crate) mod internal {
+    use super::*;
+
+    /// Be default, "Value" is not a valid trait object. This basic marker is it and serve as a placeholder.
+    pub trait DynValue: 'static + std::fmt::Debug + Any + Send + Sync {
+        /// Clone the value into a boxed trait object.
+        fn clone_box(&self) -> Box<dyn DynValue>;
+    }
+
+    impl<T> DynValue for T
+    where
+        T: 'static + std::fmt::Debug + Any + Send + Sync + Clone,
+    {
+        fn clone_box(&self) -> Box<dyn DynValue> {
+            Box::new(self.clone())
+        }
+    }
+}
 /// Marker trait for values that can be stored in token history and messages.
 pub trait Value:
-    'static
-    + Sized
-    + Send
-    + Sync
-    + Any
-    + Clone
-    + serde::Serialize
-    + for<'a> serde::Deserialize<'a>
-    + JsonSchema
+    internal::DynValue + Clone + serde::Serialize + for<'a> serde::Deserialize<'a> + JsonSchema
 {
 }
 
 impl<T> Value for T where
-    T: Sized
-        + Send
-        + Sync
-        + Any
-        + Clone
-        + serde::Serialize
-        + for<'a> serde::Deserialize<'a>
-        + JsonSchema
+    T: internal::DynValue + Clone + serde::Serialize + for<'a> serde::Deserialize<'a> + JsonSchema
 {
 }
 
@@ -43,6 +46,8 @@ impl TokenId {
 
 /// A BPMN token.
 pub struct Token<S> {
+    /// The entity responsible for the token, which is used for access control and auditing.
+    pub responsible: Entity,
     ids: Vec<TokenId>,
     storage: S,
 }
@@ -51,13 +56,15 @@ impl<S> std::fmt::Debug for Token<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Token")
             .field("ids", &self.ids)
+            .field("responsible", &self.responsible)
             .finish_non_exhaustive()
     }
 }
 
 impl<S: Storage> Token<S> {
-    pub(crate) fn new(storage: S) -> Self {
+    pub(crate) fn new(responsible: Entity, storage: S) -> Self {
         Self {
+            responsible,
             ids: vec![TokenId::new()],
             storage,
         }
@@ -68,6 +75,7 @@ impl<S: Storage> Token<S> {
         let mut ids = self.ids.clone();
         ids.push(TokenId::new());
         Self {
+            responsible: self.responsible.clone(),
             ids,
             storage: self.storage.clone(),
         }
@@ -82,8 +90,14 @@ impl<S: Storage> Token<S> {
     }
 
     /// Adds a typed output value for the given step and returns the updated token.
-    pub fn set_output<T: Value>(self, step: Step, value: T) -> Self {
-        self.storage.add(self.id(), step, value);
+    pub fn set_output<T: Value>(mut self, step: Step, value: T) -> Self {
+        self.storage.add(&self.responsible, self.id(), step, value);
+
+        // After setting a output, the token is afterwards handled by the system again.
+        if self.responsible != Entity::SYSTEM {
+            self.responsible = Entity::SYSTEM;
+        }
+
         self
     }
 
@@ -109,6 +123,7 @@ impl<S> Eq for Token<S> {}
 impl<S: Clone> Clone for Token<S> {
     fn clone(&self) -> Self {
         Token {
+            responsible: self.responsible.clone(),
             ids: self.ids.clone(),
             storage: self.storage.clone(),
         }
@@ -124,7 +139,7 @@ mod tests {
     #[test]
     fn token_history_returns_latest_value_and_task() {
         let steps = Steps::new(["step-a", "step-b", "step-c"].into_iter()).unwrap();
-        let token = Token::new(InMemoryStorage::for_test())
+        let token = Token::new(Entity::SYSTEM, InMemoryStorage::for_test())
             .set_output(steps.get("step-a").unwrap(), 1_i32)
             .set_output(steps.get("step-b").unwrap(), 2_i32)
             .set_output(steps.get("step-c").unwrap(), 3_i32);
@@ -136,8 +151,8 @@ mod tests {
     #[test]
     fn token_child_branch_keeps_parent_history_visible() {
         let steps = Steps::new(["root", "child"].into_iter()).unwrap();
-        let root =
-            Token::new(InMemoryStorage::for_test()).set_output(steps.get("root").unwrap(), 5_i32);
+        let root = Token::new(Entity::SYSTEM, InMemoryStorage::for_test())
+            .set_output(steps.get("root").unwrap(), 5_i32);
         let child = root.fork().set_output(steps.get("child").unwrap(), 9_i32);
 
         assert_eq!(root.get_last::<i32>(), Some(5));
@@ -147,7 +162,7 @@ mod tests {
     #[test]
     fn shared_history_tracks_current_places_for_active_branches() {
         let steps = Steps::new(["start", "root-step", "child-step"].into_iter()).unwrap();
-        let root = Token::new(InMemoryStorage::for_test())
+        let root = Token::new(Entity::SYSTEM, InMemoryStorage::for_test())
             .set_output(steps.get("start").unwrap(), 1_i32)
             .set_output(steps.get("root-step").unwrap(), 2_i32);
         let child = root

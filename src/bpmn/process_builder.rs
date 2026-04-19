@@ -206,15 +206,15 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
                 state.len() == 1,
                 "Exactly one token should be consumed by a wait step"
             );
-            let token = state.into_iter().next().unwrap();
+            let mut token = state.into_iter().next().unwrap();
             let value: E = token
                 .get_last()
                 .expect("the input value should be present in the token history");
 
-            let token = token.set_output(name.clone(), ());
             let future: Pin<Box<dyn Future<Output = Vec<Token<S>>> + Send>> =
                 Box::pin(async move {
-                    let output = waitable.wait_for(&token, value).await;
+                    let (entity, output) = waitable.wait_for(&mut token, value).await;
+                    token.responsible = entity;
                     vec![token.set_output(name.clone(), output)]
                 });
             future

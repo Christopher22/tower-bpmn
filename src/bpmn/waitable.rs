@@ -1,10 +1,11 @@
 use std::borrow::Cow;
 
 use chrono::DateTime;
+use futures::FutureExt;
 
 use crate::bpmn::{
     ExternalStepData, Process, Storage, Token, Value,
-    messages::{CorrelationKey, MessageBroker, MessageMetaData, Messages, Participant},
+    messages::{CorrelationKey, Entity, MessageBroker, MessageMetaData, Messages, Participant},
     steps::{Step, StepsBuilder},
     storage::NoOutput,
 };
@@ -25,7 +26,7 @@ pub(crate) mod internal {
 /// Asynchronous wait abstraction used for BPMN waiting events.
 pub trait Waitable<P: Process, T: Value, O: Value>: internal::Registerable {
     /// Future returned by the wait implementation.
-    type Future: Future<Output = O> + Send;
+    type Future: Future<Output = (Entity, O)> + Send;
 
     /// Starts waiting for a value and resolves to the produced output.
     fn wait_for<S: Storage>(&self, token: &Token<S>, value: T) -> Self::Future;
@@ -41,9 +42,17 @@ impl internal::Registerable for Timer {
     }
 }
 
-impl<P: Process> Waitable<P, DateTime<chrono::Utc>, NoOutput> for Timer {
-    type Future = futures::future::Either<futures::future::Ready<NoOutput>, tokio::time::Sleep>;
+fn skip_output(_: ()) -> (Entity, NoOutput) {
+    (Entity::SYSTEM, ())
+}
 
+impl<P: Process> Waitable<P, DateTime<chrono::Utc>, NoOutput> for Timer {
+    type Future = futures::future::Either<
+        futures::future::Ready<(Entity, NoOutput)>,
+        futures::future::Map<tokio::time::Sleep, fn(()) -> (Entity, NoOutput)>,
+    >;
+
+    #[allow(trivial_casts)]
     fn wait_for<S: Storage>(
         &self,
         _token: &Token<S>,
@@ -55,11 +64,13 @@ impl<P: Process> Waitable<P, DateTime<chrono::Utc>, NoOutput> for Timer {
             .map_or_else(
                 |_| {
                     // If the value is in the past, return immediately.
-                    futures::future::Either::Left(futures::future::ready(()))
+                    futures::future::Either::Left(futures::future::ready((Entity::SYSTEM, ())))
                 },
                 |duration| {
                     // If the value is in the future, wait until then.
-                    futures::future::Either::Right(tokio::time::sleep(duration))
+                    futures::future::Either::Right(
+                        tokio::time::sleep(duration).map(skip_output as fn(()) -> (Entity, ())),
+                    )
                 },
             )
     }
@@ -108,7 +119,7 @@ impl<P: Process, E: Value> internal::Registerable for IncomingMessage<P, E> {
 }
 
 impl<P: Process, E: Value> Waitable<P, CorrelationKey, E> for IncomingMessage<P, E> {
-    type Future = futures::future::BoxFuture<'static, E>;
+    type Future = futures::future::BoxFuture<'static, (Entity, E)>;
 
     fn wait_for<S: Storage>(
         &self,
@@ -122,7 +133,7 @@ impl<P: Process, E: Value> Waitable<P, CorrelationKey, E> for IncomingMessage<P,
 
         let mut receiver = messages.subscribe();
         if let Some(message) = messages.receive::<E>(correlation_key) {
-            return Box::pin(async move { message });
+            return Box::pin(async move { (Entity::SYSTEM, message) });
         }
 
         let expected_sender = self.4.clone();
@@ -137,8 +148,15 @@ impl<P: Process, E: Value> Waitable<P, CorrelationKey, E> for IncomingMessage<P,
                         if !context.is_suitable_for(&expected_sender) {
                             continue;
                         }
+
+                        // Extract the responsible entity from the message context, which allows verifying the sender of the message. If there's no responsible entity, we can't verify the sender, so we ignore the message and keep waiting.
+                        let responsible = match context.responsible_entity() {
+                            Some(responsible) => responsible.clone(),
+                            None => continue, // If there's no responsible entity, we can't verify the sender, so ignore the message.
+                        };
+
                         if let Some(message) = messages.receive::<E>(correlation_key) {
-                            return message;
+                            return (responsible, message);
                         }
                     }
                     Ok(_) => {}

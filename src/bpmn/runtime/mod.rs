@@ -8,7 +8,7 @@ mod token;
 use serde_json::Value as JsonValue;
 use std::{collections::HashMap, sync::Arc};
 
-use super::messages::{Context, Message, MessageBroker, MessageError};
+use super::messages::{Context, Entity, Message, MessageBroker, MessageError};
 use super::{ExtendedExecutor, Process, ProcessBuilder, ProcessName};
 
 pub use dynamic::{DynamicInput, DynamicValue};
@@ -16,6 +16,8 @@ pub use instance::{Handle, Instance, InstanceId, InstanceNotRunning, InstanceSta
 pub use instances::{InstanceSpawnError, Instances};
 pub use registered_process::RegisteredProcess;
 pub use token::{Token, TokenId, Value};
+
+pub(crate) use token::internal::DynValue;
 
 use storage::{StorageBackend, StorageError};
 
@@ -25,7 +27,8 @@ pub struct Runtime<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
     pub messages: MessageBroker,
     registered_processes: HashMap<ProcessName, Arc<Instances<E, B>>>,
     executor: E,
-    storage_backend: B,
+    /// The underlying storage backend used for storing instance data, which is shared across all instances and processes in this runtime.
+    pub storage_backend: B,
 }
 
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
@@ -114,15 +117,6 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
         }
     }
 
-    /// Starts a registered process by its name using JSON input.
-    pub fn run_dynamic(
-        &self,
-        process_name: ProcessName,
-        input: JsonValue,
-    ) -> Result<InstanceId, InstanceSpawnError> {
-        self.run_dynamic_with_context(process_name, input, Context::default())
-    }
-
     /// Starts a registered process by its name using JSON input and explicit message context.
     pub fn run_dynamic_with_context(
         &self,
@@ -145,13 +139,14 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Runtime<E, B> {
     pub fn run<P: Process>(
         &self,
         process: P,
+        owner: Entity,
         input: P::Input,
     ) -> Result<InstanceId, InstanceSpawnError> {
         match self
             .registered_processes
             .get(&ProcessName::from(process.metadata()))
         {
-            Some(registered_process) => Ok(registered_process.run(input)),
+            Some(registered_process) => Ok(registered_process.run(owner, input)),
             None => Err(InstanceSpawnError::Unregistered),
         }
     }
