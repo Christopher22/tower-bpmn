@@ -3,8 +3,8 @@
 use std::{borrow::Cow, ops::DerefMut};
 
 use crate::{
-    bpmn::{Step, StepsBuilder, Storage},
-    petri_net::{Id, PetriNet, Place},
+    bpmn::{ProcessBuilderRef, Storage, steps::Step, storage::NoOutput},
+    petri_net::{Id, Place},
 };
 
 use super::Value;
@@ -17,9 +17,7 @@ pub trait SplitableGateway<S: Storage>: Gateway<S> {
     /// Adds the required Petri-net nodes for this split gateway.
     fn add_nodes<const NUM: usize>(
         &self,
-        petri_net: impl DerefMut<Target = PetriNet<super::BpmnStep<S>, super::State<S>>>,
-        current_place: Id<Place<super::State<S>>>,
-        steps: &StepsBuilder,
+        process_builder: ProcessBuilderRef<S, Id<Place<super::State<S>>>>,
     ) -> [Id<Place<super::State<S>>>; NUM];
 }
 
@@ -31,9 +29,7 @@ pub trait JoinableGateway<const NUM: usize, V: Value, S: Storage>: Gateway<S> {
     /// Adds the required Petri-net nodes for this join gateway.
     fn add_nodes(
         self,
-        petri_net: impl DerefMut<Target = PetriNet<super::BpmnStep<S>, super::State<S>>>,
-        current_places: [Id<Place<super::State<S>>>; NUM],
-        steps: &StepsBuilder,
+        process_builder: ProcessBuilderRef<S, [Id<Place<super::State<S>>>; NUM]>,
     ) -> Id<Place<super::State<S>>>;
 }
 
@@ -66,15 +62,16 @@ impl<S: Storage, const NUM: usize, V: Value> JoinableGateway<NUM, V, S> for Xor<
 
     fn add_nodes(
         self,
-        mut petri_net: impl DerefMut<Target = PetriNet<super::BpmnStep<S>, super::State<S>>>,
-        current_places: [Id<Place<super::State<S>>>; NUM],
-        steps: &StepsBuilder,
+        mut process_builder: ProcessBuilderRef<S, [Id<Place<super::State<S>>>; NUM]>,
     ) -> Id<Place<super::State<S>>> {
-        let petri_net = petri_net.deref_mut();
+        let petri_net = process_builder.petri_net.deref_mut();
         let output = petri_net.add_place(Place::new((), super::State::Inactive));
 
-        let join_name = steps.add(self.0).expect("valid name");
-        for place in current_places.into_iter() {
+        let join_name = process_builder
+            .steps
+            .add::<NoOutput>(self.0)
+            .expect("valid name");
+        for place in process_builder.targets.into_iter() {
             let transition = petri_net.add_transition(super::BpmnStep::Task(
                 join_name.clone(),
                 Box::new(|name: Step, state: Vec<super::Token<S>>| {
@@ -97,17 +94,18 @@ impl<S: Storage, V: Value, C: Fn(&super::Token<S>, V) -> usize + Clone + Sync + 
 {
     fn add_nodes<const NUM: usize>(
         &self,
-        mut petri_net: impl DerefMut<Target = PetriNet<super::BpmnStep<S>, super::State<S>>>,
-        current_place: Id<Place<super::State<S>>>,
-        steps: &StepsBuilder,
+        mut process_builder: ProcessBuilderRef<S, Id<Place<super::State<S>>>>,
     ) -> [Id<Place<super::State<S>>>; NUM] {
-        let petri_net = petri_net.deref_mut();
+        let petri_net = process_builder.petri_net.deref_mut();
         std::array::from_fn(|i| {
             let new_place = petri_net.add_place(Place::new((), super::State::Inactive));
             // Use XorBranch so that only the selected branch transition is enabled
             // according to the BPMN XOR-split standard: exactly one outgoing path fires.
             let transition = petri_net.add_transition(super::BpmnStep::XorBranch(
-                steps.add(format!("{}: {}", self.0, i)).expect("valid name"),
+                process_builder
+                    .steps
+                    .add::<NoOutput>(format!("{}: {}", self.0, i))
+                    .expect("valid name"),
                 Box::new({
                     let callback = self.1.clone();
                     move |token: &super::Token<S>| {
@@ -118,7 +116,7 @@ impl<S: Storage, V: Value, C: Fn(&super::Token<S>, V) -> usize + Clone + Sync + 
                     }
                 }),
             ));
-            petri_net.connect_place(current_place, transition, ());
+            petri_net.connect_place(process_builder.targets, transition, ());
             petri_net.connect_transition(transition, new_place, ());
             new_place
         })
@@ -134,13 +132,11 @@ impl<S: Storage> Gateway<S> for And {}
 impl<S: Storage> SplitableGateway<S> for And {
     fn add_nodes<const NUM: usize>(
         &self,
-        mut petri_net: impl DerefMut<Target = PetriNet<super::BpmnStep<S>, super::State<S>>>,
-        current_place: Id<Place<super::State<S>>>,
-        _: &StepsBuilder,
+        mut process_builder: ProcessBuilderRef<S, Id<Place<super::State<S>>>>,
     ) -> [Id<Place<super::State<S>>>; NUM] {
-        let petri_net = petri_net.deref_mut();
+        let petri_net = process_builder.petri_net.deref_mut();
         let transition_and = petri_net.add_transition(super::BpmnStep::And(NUM));
-        petri_net.connect_place(current_place, transition_and, ());
+        petri_net.connect_place(process_builder.targets, transition_and, ());
 
         std::array::from_fn(|_| {
             let next_place = petri_net.add_place(Place::new((), super::State::Inactive));
@@ -158,15 +154,16 @@ where
 
     fn add_nodes(
         self,
-        mut petri_net: impl DerefMut<Target = PetriNet<super::BpmnStep<S>, super::State<S>>>,
-        current_places: [Id<Place<super::State<S>>>; NUM],
-        steps: &StepsBuilder,
+        mut process_builder: ProcessBuilderRef<S, [Id<Place<super::State<S>>>; NUM]>,
     ) -> Id<Place<super::State<S>>> {
-        let petri_net = petri_net.deref_mut();
+        let petri_net = process_builder.petri_net.deref_mut();
         let output = petri_net.add_place(Place::new((), super::State::Inactive));
 
         let transition = petri_net.add_transition(super::BpmnStep::Task(
-            steps.add(self.0).expect("valid name"),
+            process_builder
+                .steps
+                .add::<[V; NUM]>(self.0)
+                .expect("valid name"),
             Box::new(|name: Step, state: Vec<super::Token<S>>| {
                 assert_eq!(
                     state.len(),
@@ -194,7 +191,7 @@ where
             }),
         ));
 
-        for place in current_places {
+        for place in process_builder.targets {
             petri_net.connect_place(place, transition, ());
         }
         petri_net.connect_transition(transition, output, ());

@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use super::super::{
     BpmnStep, ExtendedExecutor, MetaData, Process, ProcessBuilder, ProcessError, ProcessName,
-    State, Step, Steps, StorageBackend, Token, Value,
+    State, Step, Steps, Token, Value, storage::StorageBackend,
 };
 use super::DynamicInput;
 use crate::petri_net::{FirstCompetingStrategy, Id, PetriNet, Place, Simulation};
@@ -32,7 +32,7 @@ pub struct RegisteredProcess<B: StorageBackend> {
 
 impl<B: StorageBackend> RegisteredProcess<B> {
     /// Create a new raw process from a PetriNet representation and type information.
-    fn new<P: Process>(
+    pub(crate) fn new<P: Process>(
         meta_data: MetaData,
         petri_net: PetriNetRef<B::Storage>,
         start_place: Id<Place<State<B::Storage>>>,
@@ -64,7 +64,7 @@ impl<B: StorageBackend> RegisteredProcess<B> {
         shared_storage: B::Storage,
     ) -> Simulation<A, FirstCompetingStrategy, BpmnStep<B::Storage>, State<B::Storage>> {
         assert!(
-            self.input.matches::<V>(),
+            self.input.input.matches::<V>(),
             "The input type does not match the expected type for this process"
         );
         let token = Token::new(shared_storage).set_output(self.steps.start().into(), input);

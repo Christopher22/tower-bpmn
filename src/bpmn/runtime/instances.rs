@@ -2,7 +2,10 @@ use dashmap::DashMap;
 use serde::ser::{SerializeSeq, SerializeStruct};
 
 use super::super::ExtendedExecutor;
-use super::{Instance, InstanceId, RegisteredProcess, StorageError, StorageBackend, Value};
+use super::{
+    Instance, InstanceId, RegisteredProcess, Value,
+    storage::{StorageBackend, StorageError},
+};
 
 /// A collection of process instances for a specific registered process definition.
 #[derive(Debug)]

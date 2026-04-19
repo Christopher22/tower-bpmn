@@ -41,7 +41,7 @@ impl DynamicInput {
     /// Creates a new dynamic input for a given type.
     pub fn new<V: Value>(external_step: ExternalStep) -> Self {
         assert!(
-            external_step.as_ref().matches::<V>(),
+            external_step.as_ref().input.matches::<V>(),
             "The external step does not match the expected type for this input"
         );
         DynamicInput {

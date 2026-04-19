@@ -19,8 +19,9 @@ use super::{
 };
 use crate::bpmn::{
     ExtendedExecutor, Instance, InstanceId, Instances, MetaData, ProcessName, RegisteredProcess,
-    Runtime, Step, StorageBackend,
+    Runtime, Step,
     messages::{Context, CorrelationKey, Message, MessageError, Participant},
+    storage::StorageBackend,
 };
 
 type GetCallback<E, B> =
@@ -740,7 +741,7 @@ pub(super) fn register_runtime_routes<E: ExtendedExecutor<B::Storage>, B: Storag
             routes,
             process_name.clone(),
             start_type.as_ref().expected_participant.clone(),
-            start_type.as_ref().schema.as_value(),
+            start_type.as_ref().input.schema.as_value(),
         );
 
         for external_step in process.steps.external_steps() {
@@ -752,7 +753,7 @@ pub(super) fn register_runtime_routes<E: ExtendedExecutor<B::Storage>, B: Storag
                 process_name.clone(),
                 step,
                 external_step.expected_participant.clone(),
-                external_step.schema.as_value(),
+                external_step.input.schema.as_value(),
             );
         }
     }
@@ -1108,7 +1109,14 @@ impl ProcessSummary {
                 .steps()
                 .filter_map(|step| process.steps.get(step))
                 .collect(),
-            input_schema: process.steps.start().as_ref().schema.as_value().clone(),
+            input_schema: process
+                .steps
+                .start()
+                .as_ref()
+                .input
+                .schema
+                .as_value()
+                .clone(),
         }
     }
 }

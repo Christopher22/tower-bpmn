@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::{guard::OpenApiSecurityScheme, route::Route};
-use crate::bpmn::{ExtendedExecutor, StorageBackend};
+use crate::bpmn::{ExtendedExecutor, storage::StorageBackend};
 
 /// Serializable route-derived OpenAPI view used by the renderer.
 #[derive(Default)]

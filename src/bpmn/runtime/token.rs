@@ -117,7 +117,7 @@ impl<S: Clone> Clone for Token<S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::bpmn::{InMemoryStorage, Steps};
+    use crate::bpmn::{Steps, storage::InMemoryStorage};
 
     use super::*;
 

@@ -1,7 +1,8 @@
 use std::time::Duration;
 use tower_bpmn::bpmn::{
-    InMemory, IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Step, Storage, Token,
+    IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Step, Token,
     messages::{Context, CorrelationKey, Message},
+    storage::{InMemory, Storage},
 };
 
 // ============================================================================

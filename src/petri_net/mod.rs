@@ -90,6 +90,7 @@ pub struct PetriNet<A, C: Color> {
 }
 
 /// A tuple representing two connected places with a transition in between.
+#[cfg(test)]
 pub type ConnectedPlaces<A, C> = (Id<Place<C>>, Id<Transition<A, C>>, Id<Place<C>>);
 
 impl<A, C: Color> PetriNet<A, C> {
@@ -108,6 +109,7 @@ impl<A, C: Color> PetriNet<A, C> {
     }
 
     /// Convenience function to add two connected places with a transition in between, all with default weights.
+    #[cfg(test)]
     pub fn add_connected_places(
         &mut self,
         p1: Place<C>,
@@ -172,11 +174,6 @@ impl<A, C: Color> PetriNet<A, C> {
                 })
                 .collect(),
         )
-    }
-
-    /// Iterate over the places in the Petri net.
-    pub fn places(&self) -> impl Iterator<Item = Entry<'_, Place<C>>> {
-        self.places.iter()
     }
 
     /// Iterate over the transitions in the Petri net.

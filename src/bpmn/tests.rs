@@ -1,8 +1,17 @@
 use chrono::{DateTime, Duration, Utc};
 use tokio::time::{Duration as TokioDuration, timeout};
 
-use super::messages::*;
-use super::*;
+use crate::bpmn::{
+    IncomingMessage, InstanceId, InstanceSpawnError, MetaData, Process, Runtime, Timer, Type,
+    Waitable, gateways,
+    messages::Message,
+    messages::{CorrelationKey, MessageBroker, MessageError, Participant},
+    process_builder::ProcessBuilder,
+    runtime::Token,
+    steps,
+    storage::{InMemory, InMemoryStorage, Storage},
+    waitable::internal::Registerable,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DummyProcess;
@@ -191,9 +200,9 @@ fn xor_process_definition_registers_successfully() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn incoming_message_waitable_returns_payload() {
-    let mut steps = StepsBuilder::default();
+    let mut steps = steps::StepsBuilder::default();
     steps.add_start::<()>(Participant::Everyone).unwrap();
-    steps.add_end();
+    steps.add_end(Type::new::<()>());
 
     let mut waitable = IncomingMessage::<DummyProcess, i32>::new(DummyProcess, "example");
     let messages = MessageBroker::new();
@@ -212,9 +221,9 @@ async fn incoming_message_waitable_returns_payload() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn incoming_message_waitable_ignores_other_correlation_keys() {
-    let mut steps = StepsBuilder::default();
+    let mut steps = steps::StepsBuilder::default();
     steps.add_start::<()>(Participant::Everyone).unwrap();
-    steps.add_end();
+    steps.add_end(Type::new::<()>());
 
     let mut waitable = IncomingMessage::<DummyProcess, i32>::new(DummyProcess, "example");
     let messages = MessageBroker::new();

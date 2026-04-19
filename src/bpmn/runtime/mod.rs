@@ -2,7 +2,7 @@ mod dynamic;
 mod instance;
 mod instances;
 mod registered_process;
-mod storage;
+pub mod storage;
 mod token;
 
 use serde_json::Value as JsonValue;
@@ -15,11 +15,9 @@ pub use dynamic::{DynamicInput, DynamicValue};
 pub use instance::{Handle, Instance, InstanceId, InstanceNotRunning, InstanceStatus};
 pub use instances::{InstanceSpawnError, Instances};
 pub use registered_process::RegisteredProcess;
-pub use storage::{
-    InMemory, InMemoryStorage, ResumableProcess, Sqlite, SqliteError, SqliteStorage, Storage,
-    StorageBackend, StorageError,
-};
 pub use token::{Token, TokenId, Value};
+
+use storage::{StorageBackend, StorageError};
 
 /// Runtime that stores process definitions and starts process instances.
 pub struct Runtime<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {

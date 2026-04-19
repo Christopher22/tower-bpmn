@@ -1,6 +1,7 @@
 use tower_bpmn::bpmn::{
-    InMemory, IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Step, Storage, Token,
+    IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Step, Token,
     messages::{CorrelationKey, Message},
+    storage::{InMemory, Storage},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

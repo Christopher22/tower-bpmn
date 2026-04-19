@@ -1,6 +1,6 @@
 use axum::{Router, routing::get};
 use tower_bpmn::Api;
-use tower_bpmn::bpmn::{InMemory, Runtime};
+use tower_bpmn::bpmn::{Runtime, storage::InMemory};
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_axum() {

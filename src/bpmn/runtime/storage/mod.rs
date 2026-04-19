@@ -1,3 +1,5 @@
+//! Storages backends for process instances, which can be used to store token values and other data related to the instance.
+
 mod in_memory;
 mod sqlite;
 
@@ -9,6 +11,9 @@ use crate::petri_net::{Id, Place};
 
 pub use self::in_memory::{InMemory, InMemoryStorage};
 pub use self::sqlite::{Sqlite, SqliteError, SqliteStorage};
+
+/// A type which can be used to indicate a step does not have an output.
+pub type NoOutput = ();
 
 /// A backend suitable for storing the data of instances.
 pub trait StorageBackend: 'static + Clone + Sized + Send + Sync {

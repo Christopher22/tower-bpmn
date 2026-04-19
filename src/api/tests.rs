@@ -3,8 +3,9 @@ use http_body_util::{Empty, Full};
 use tower_service::Service;
 
 use crate::bpmn::{
-    InMemory, IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Storage, Token,
+    IncomingMessage, MetaData, Process, ProcessBuilder, Runtime, Token,
     messages::{Context, CorrelationKey, Participant},
+    storage::{InMemory, Storage},
 };
 use crate::{Api, Guard, OpenApiSecurityScheme, executor::TokioExecutor};
 

@@ -7,7 +7,7 @@ use tokio::sync::broadcast::{Receiver, Sender};
 
 use super::{
     DynamicValue, ExtendedExecutor, ExternalStep, InstanceId, InstanceSpawnError, Instances,
-    MetaData, Process, ProcessName, Step, StorageBackend, Value, runtime::DynamicInput,
+    MetaData, Process, ProcessName, Step, Value, runtime::DynamicInput, storage::StorageBackend,
 };
 
 mod broker;

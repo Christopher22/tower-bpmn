@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 
-use super::super::{ExtendedExecutor, Instances, Process, ProcessName, StorageBackend};
+use super::super::{ExtendedExecutor, Instances, Process, ProcessName, storage::StorageBackend};
 use super::{Messages, SendableWithTarget};
 
 #[derive(Debug, Clone)]

@@ -25,8 +25,9 @@ use tower_service::Service;
 use self::error::Error;
 pub use self::guard::{EverybodyGuard, Guard, OpenApiSecurityScheme};
 use crate::bpmn::{
-    ExtendedExecutor, Runtime, StorageBackend,
+    ExtendedExecutor, Runtime,
     messages::{Context as MessageContext, Participant},
+    storage::StorageBackend,
 };
 
 /// A service that exposes the BPMN runtime API over HTTP.

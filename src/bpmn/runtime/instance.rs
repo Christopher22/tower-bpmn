@@ -3,7 +3,10 @@ use serde::{Serialize, ser::SerializeStruct};
 use uuid::Uuid;
 
 use super::super::{BpmnStep, ExtendedExecutor, State, Step};
-use super::{RegisteredProcess, ResumableProcess, Storage, StorageBackend, Token, Value};
+use super::{
+    RegisteredProcess, Token, Value,
+    storage::{ResumableProcess, Storage, StorageBackend},
+};
 use crate::{
     executor::Executor,
     petri_net::{FirstCompetingStrategy, Id, Place, Simulation},
