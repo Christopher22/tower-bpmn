@@ -1,7 +1,7 @@
 //! HTTP API service wrapping the BPMN runtime.
 
 mod error;
-mod guard;
+pub mod guards;
 mod openapi;
 mod route;
 
@@ -23,7 +23,7 @@ use serde::Serialize;
 use tower_service::Service;
 
 use self::error::Error;
-pub use self::guard::{EverybodyGuard, Guard, OpenApiSecurityScheme};
+use self::guards::{EverybodyGuard, Guard};
 use crate::bpmn::{
     ExtendedExecutor, Runtime,
     messages::{Context as MessageContext, Participant},

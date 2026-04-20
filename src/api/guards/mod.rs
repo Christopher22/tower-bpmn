@@ -1,3 +1,9 @@
+//! Guards for deriving context from incoming HTTP requests.
+
+mod authorization;
+
+pub use authorization::AuthorizationGuard;
+
 use http::request::Parts;
 
 use crate::bpmn::messages::{Context, Entity};

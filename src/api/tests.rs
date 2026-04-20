@@ -7,7 +7,11 @@ use crate::bpmn::{
     messages::{Context, CorrelationKey, Entity, Participant, Role},
     storage::{InMemory, Storage},
 };
-use crate::{Api, Guard, OpenApiSecurityScheme, executor::TokioExecutor};
+use crate::{
+    Api,
+    executor::TokioExecutor,
+    guards::{Guard, OpenApiSecurityScheme},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StartProcess;
@@ -523,7 +527,7 @@ async fn guard_with_nobody_cannot_access_protected_route() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn guard_context_is_used_for_process_start() {
-    let mut blocked = build_restricted_api(crate::EverybodyGuard);
+    let mut blocked = build_restricted_api(crate::guards::EverybodyGuard);
     let (blocked_status, blocked_body) = call_json(
         &mut blocked,
         post("/api/processes/restricted-process-1/instances", 7.into()),
