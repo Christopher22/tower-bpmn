@@ -20,6 +20,18 @@ impl Entity {
     }
 }
 
+impl From<&'static str> for Entity {
+    fn from(value: &'static str) -> Self {
+        Entity(Cow::Borrowed(value))
+    }
+}
+
+impl From<String> for Entity {
+    fn from(value: String) -> Self {
+        Entity(Cow::Owned(value))
+    }
+}
+
 impl std::fmt::Display for Entity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)

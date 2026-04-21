@@ -14,6 +14,19 @@ use crate::petri_net::{Id, Place};
 pub use self::in_memory::{InMemory, InMemoryStorage};
 pub use self::sqlite::{Sqlite, SqliteError, SqliteStorage};
 
+/// A finished step in the process history, which can be used for auditing and debugging purposes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct FinishedStep {
+    /// The datetime when the step was finished.
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// The responsible entity which executed the step.
+    pub responsible: Entity,
+    /// The output value produced by the step. The value is stored as a JSON value, which could be deserialized into the expected type by the caller.
+    pub output: JsonValue,
+}
+
 /// A type which can be used to indicate a step does not have an output.
 pub type NoOutput = ();
 
@@ -22,15 +35,14 @@ pub trait StorageBackend: 'static + Clone + Sized + Send + Sync {
     /// The type of storage used for instances.
     type Storage: Storage;
 
-    /// Query the backend for the values of the given step and instance ID, independentkly of the processes is currently running or already completed.
-    /// The results are returned as a list of JSON values ordered by insertion, which could be deserialized into the expected types by the caller.
+    /// Query the backend for the values of the given step and instance ID, independently of the processes is currently running or already completed.
     /// If the step was not executed in the given instance, an empty list is returned.
     fn query(
         &self,
         process: &RegisteredProcess<Self>,
         step: Step,
         instance_id: InstanceId,
-    ) -> Result<Vec<JsonValue>, StorageError>;
+    ) -> Result<Vec<FinishedStep>, StorageError>;
 
     /// Register a new instance.
     fn new_instance(

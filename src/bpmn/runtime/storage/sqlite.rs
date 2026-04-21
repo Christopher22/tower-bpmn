@@ -8,7 +8,7 @@ use serde_json::Value as JsonValue;
 use crate::bpmn::{
     InstanceId, ProcessName, RegisteredProcess, Step, Steps, Token, TokenId, Value,
     messages::Entity,
-    storage::{ResumableProcess, Storage, StorageBackend, StorageError},
+    storage::{FinishedStep, ResumableProcess, Storage, StorageBackend, StorageError},
 };
 
 /// Errors emitted while opening or preparing SQLite storage.
@@ -106,6 +106,7 @@ impl Sqlite {
                 token_slot INTEGER NOT NULL,
                 value_json TEXT NOT NULL,
                 entity_id INTEGER REFERENCES entities(id) ON DELETE RESTRICT,
+                timestamp TEXT NOT NULL DEFAULT (datetime('now')),
                 CHECK(token_slot >= 0)
             );
 
@@ -146,7 +147,7 @@ impl StorageBackend for Sqlite {
         process: &RegisteredProcess<Self>,
         step: Step,
         instance_id: InstanceId,
-    ) -> Result<Vec<JsonValue>, StorageError> {
+    ) -> Result<Vec<FinishedStep>, StorageError> {
         let found_process: Option<(i64, String, u32)> = self.with_connection(|connection| {
             connection
                 .query_row(
@@ -184,32 +185,45 @@ impl StorageBackend for Sqlite {
             return Ok(Vec::new());
         };
 
-        let raw_values: Vec<String> = self.with_connection(|connection| {
+        let finished_steps: Vec<FinishedStep> = self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "
-                SELECT value_json
-                FROM finished_steps
-                WHERE instance_id = ?1 AND step_id = ?2
-                ORDER BY id ASC
+                SELECT f.value_json, f.timestamp, COALESCE(e.name, NULL)
+                FROM finished_steps f
+                LEFT JOIN entities e ON e.id = f.entity_id
+                WHERE f.instance_id = ?1 AND f.step_id = ?2
+                ORDER BY f.id ASC
                 ",
             )?;
-            let rows = statement
-                .query_map(params![instance_id.to_string(), step_db_id], |row| {
-                    row.get::<_, String>(0)
+            let rows =
+                statement.query_map(params![instance_id.to_string(), step_db_id], |row| {
+                    let value_json_str: String = row.get(0)?;
+                    let timestamp_str: String = row.get(1)?;
+                    let entity_name: Option<String> = row.get(2)?;
+
+                    let value_json = serde_json::from_str::<JsonValue>(&value_json_str)
+                        .unwrap_or(JsonValue::Null);
+                    let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now());
+                    let responsible = entity_name.map(Entity::from).unwrap_or(Entity::SYSTEM);
+
+                    Ok(FinishedStep {
+                        timestamp,
+                        responsible,
+                        output: value_json,
+                    })
                 })?;
 
-            let mut values = Vec::new();
+            let mut collected = Vec::new();
             for row in rows {
-                values.push(row?);
+                collected.push(row?);
             }
 
-            Ok(values)
+            Ok(collected)
         });
 
-        Ok(raw_values
-            .into_iter()
-            .filter_map(|value| serde_json::from_str::<JsonValue>(&value).ok())
-            .collect())
+        Ok(finished_steps)
     }
 
     fn new_instance(
@@ -1041,11 +1055,13 @@ mod tests {
         storage.add(&Entity::SYSTEM, token.id(), identity.clone(), 13_i32);
         storage.add(&Entity::SYSTEM, token.id(), identity.clone(), 21_i32);
 
-        let values = backend
+        let finished_steps = backend
             .query(registered, identity, instance_id)
             .expect("query must succeed");
 
-        assert_eq!(values, vec![serde_json::json!(13), serde_json::json!(21)]);
+        assert_eq!(finished_steps.len(), 2);
+        assert_eq!(finished_steps[0].output, serde_json::json!(13));
+        assert_eq!(finished_steps[1].output, serde_json::json!(21));
     }
 
     #[test]
@@ -1331,5 +1347,90 @@ mod tests {
         assert_eq!(slot_rows.len(), 2);
         assert!(slot_rows.contains(&(draft_instance_id.to_string(), 0)));
         assert!(slot_rows.contains(&(complex_instance_id.to_string(), 0)));
+    }
+
+    #[test]
+    fn sqlite_query_returns_finished_steps_with_all_fields() {
+        let backend = Sqlite::in_memory().expect("in-memory sqlite should be available");
+        let mut runtime = Runtime::new(TokioExecutor, backend.clone());
+        runtime
+            .register_process(SqliteDraftProcess)
+            .expect("process registration must succeed");
+
+        let process_name = ProcessName::from(SqliteDraftProcess.metadata());
+        let registered = runtime
+            .get_registered_process(&process_name)
+            .expect("registered process must exist");
+        let instance_id: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+
+        let storage = backend.new_instance(registered, instance_id);
+        let step = registered
+            .steps
+            .get("identity")
+            .expect("identity step must exist");
+
+        let alice = Entity::new("Alice");
+        let bob = Entity::new("Bob");
+
+        let alice_token = Token::new(alice.clone(), storage.clone());
+        let bob_token = Token::new(bob.clone(), storage.clone());
+
+        storage.add(&alice, alice_token.id(), step.clone(), 11_i32);
+        storage.add(&bob, bob_token.id(), step.clone(), 22_i32);
+
+        let finished_steps = backend
+            .query(registered, step, instance_id)
+            .expect("query must succeed");
+
+        assert_eq!(finished_steps.len(), 2);
+
+        // First step added by Alice
+        assert_eq!(finished_steps[0].output, serde_json::json!(11));
+        assert_eq!(finished_steps[0].responsible, alice);
+
+        // Second step added by Bob
+        assert_eq!(finished_steps[1].output, serde_json::json!(22));
+        assert_eq!(finished_steps[1].responsible, bob);
+
+        // Verify timestamps are present and ordered
+        assert!(finished_steps[0].timestamp <= finished_steps[1].timestamp);
+    }
+
+    #[test]
+    fn sqlite_query_returns_system_entity_for_null_responsible() {
+        let backend = Sqlite::in_memory().expect("in-memory sqlite should be available");
+        let mut runtime = Runtime::new(TokioExecutor, backend.clone());
+        runtime
+            .register_process(SqliteDraftProcess)
+            .expect("process registration must succeed");
+
+        let process_name = ProcessName::from(SqliteDraftProcess.metadata());
+        let registered = runtime
+            .get_registered_process(&process_name)
+            .expect("registered process must exist");
+        let instance_id: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+
+        let storage = backend.new_instance(registered, instance_id);
+        let step = registered
+            .steps
+            .get("identity")
+            .expect("identity step must exist");
+
+        let token = Token::new(Entity::SYSTEM, storage.clone());
+        storage.add(&Entity::SYSTEM, token.id(), step.clone(), 42_i32);
+
+        let finished_steps = backend
+            .query(registered, step, instance_id)
+            .expect("query must succeed");
+
+        assert_eq!(finished_steps.len(), 1);
+        assert_eq!(finished_steps[0].output, serde_json::json!(42));
+        assert_eq!(finished_steps[0].responsible, Entity::SYSTEM);
     }
 }

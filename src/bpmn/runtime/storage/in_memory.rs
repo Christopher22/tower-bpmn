@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 use crate::bpmn::{
     DynValue, InstanceId, ProcessName, RegisteredProcess, Step, Storage, TokenId, Value,
     messages::Entity,
-    storage::{ResumableProcess, StorageBackend, StorageError},
+    storage::{FinishedStep, ResumableProcess, StorageBackend, StorageError},
 };
 
 /// A stored value after a process finished.
@@ -103,7 +103,7 @@ impl StorageBackend for InMemory {
         process: &RegisteredProcess<Self>,
         step: Step,
         instance_id: InstanceId,
-    ) -> Result<Vec<JsonValue>, StorageError> {
+    ) -> Result<Vec<FinishedStep>, StorageError> {
         let Some(instance) = self.0.get(&instance_id) else {
             return Err(StorageError::NotFound);
         };
@@ -125,6 +125,7 @@ impl StorageBackend for InMemory {
                     .map(|entry| {
                         (
                             entry.timestamp,
+                            entry.responsible.clone(),
                             (entry.serialize_json)(entry.value.as_ref()),
                         )
                     })
@@ -132,9 +133,16 @@ impl StorageBackend for InMemory {
             })
             .collect::<Vec<_>>();
 
-        rows.sort_by_key(|(timestamp, _)| *timestamp);
+        rows.sort_by_key(|(timestamp, _, _)| *timestamp);
 
-        Ok(rows.into_iter().map(|(_, value)| value).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(timestamp, responsible, output)| FinishedStep {
+                timestamp,
+                responsible,
+                output,
+            })
+            .collect())
     }
 
     fn new_instance(
@@ -328,11 +336,17 @@ mod tests {
         storage.add(&token.responsible, token.id(), step.clone(), 11_i32);
         storage.add(&token.responsible, token.id(), step.clone(), 22_i32);
 
-        let values = backend
+        let finished_steps = backend
             .query(registered, step, instance_id)
             .expect("query must succeed");
 
-        assert_eq!(values, vec![serde_json::json!(11), serde_json::json!(22)]);
+        assert_eq!(finished_steps.len(), 2);
+        assert_eq!(finished_steps[0].output, serde_json::json!(11));
+        assert_eq!(finished_steps[1].output, serde_json::json!(22));
+        assert_eq!(finished_steps[0].responsible, Entity::SYSTEM);
+        assert_eq!(finished_steps[1].responsible, Entity::SYSTEM);
+        // Verify timestamps are in chronological order
+        assert!(finished_steps[0].timestamp <= finished_steps[1].timestamp);
     }
 
     #[test]
@@ -382,5 +396,56 @@ mod tests {
             .expect_err("query must fail due to process mismatch");
 
         assert_eq!(error, StorageError::ProcessMismatch);
+    }
+
+    #[test]
+    fn in_memory_query_returns_finished_steps_with_responsible_and_timestamp() {
+        let backend = InMemory::default();
+        let mut runtime = Runtime::new(TokioExecutor, backend.clone());
+        runtime
+            .register_process(InMemoryQueryProcess)
+            .expect("process registration must succeed");
+
+        let process_name = ProcessName::from(InMemoryQueryProcess.metadata());
+        let registered = runtime
+            .get_registered_process(&process_name)
+            .expect("registered process must exist");
+
+        let instance_id: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+
+        let storage = backend.new_instance(registered, instance_id);
+        let step = registered
+            .steps
+            .get("identity")
+            .expect("identity step must exist");
+
+        let alice = Entity::new("Alice");
+        let charlie = Entity::new("Charlie");
+
+        let alice_token = Token::new(alice.clone(), storage.clone());
+        let charlie_token = Token::new(charlie.clone(), storage.clone());
+
+        storage.add(&alice, alice_token.id(), step.clone(), 100_i32);
+        storage.add(&charlie, charlie_token.id(), step.clone(), 200_i32);
+
+        let finished_steps = backend
+            .query(registered, step, instance_id)
+            .expect("query must succeed");
+
+        assert_eq!(finished_steps.len(), 2);
+
+        // First step added by Alice
+        assert_eq!(finished_steps[0].output, serde_json::json!(100));
+        assert_eq!(finished_steps[0].responsible, alice);
+
+        // Second step added by Charlie
+        assert_eq!(finished_steps[1].output, serde_json::json!(200));
+        assert_eq!(finished_steps[1].responsible, charlie);
+
+        // Verify timestamps are present and ordered
+        assert!(finished_steps[0].timestamp <= finished_steps[1].timestamp);
     }
 }
