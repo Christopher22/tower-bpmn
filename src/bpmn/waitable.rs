@@ -5,7 +5,7 @@ use futures::FutureExt;
 
 use crate::bpmn::{
     ExternalStepData, Process, Storage, Token, Value,
-    messages::{CorrelationKey, Entity, MessageBroker, MessageMetaData, Messages, Participant},
+    messages::{CorrelationKey, Entity, MessageBroker, Messages, Participant},
     steps::{Step, StepsBuilder},
     storage::NoOutput,
 };
@@ -131,34 +131,30 @@ impl<P: Process, E: Value> Waitable<P, CorrelationKey, E> for IncomingMessage<P,
             .clone()
             .expect("incoming message waitable must be bound to a runtime");
 
-        let mut receiver = messages.subscribe();
-        if let Some(message) = messages.receive::<E>(correlation_key) {
-            return Box::pin(async move { (Entity::SYSTEM, message) });
+        let expected_sender = self.4.clone();
+
+        let try_receive = move |messages: &Messages, correlation_key: CorrelationKey| {
+            let (metadata, message) = messages.receive::<E>(correlation_key)?;
+            if !metadata.context.is_suitable_for(&expected_sender) {
+                return None;
+            }
+
+            let responsible = metadata.context.responsible_entity()?.clone();
+            Some((responsible, message))
+        };
+
+        if let Some((responsible, message)) = try_receive(&messages, correlation_key) {
+            return Box::pin(async move { (responsible, message) });
         }
 
-        let expected_sender = self.4.clone();
+        let mut receiver = messages.subscribe();
         Box::pin(async move {
             loop {
+                if let Some((responsible, message)) = try_receive(&messages, correlation_key) {
+                    return (responsible, message);
+                }
+
                 match receiver.recv().await {
-                    Ok(MessageMetaData {
-                        correlation_key: metadata_correlation_key,
-                        context,
-                    }) if metadata_correlation_key == correlation_key => {
-                        // Check if the message context is suitable for this waitable, which allows implementing guards on the correlation key.
-                        if !context.is_suitable_for(&expected_sender) {
-                            continue;
-                        }
-
-                        // Extract the responsible entity from the message context, which allows verifying the sender of the message. If there's no responsible entity, we can't verify the sender, so we ignore the message and keep waiting.
-                        let responsible = match context.responsible_entity() {
-                            Some(responsible) => responsible.clone(),
-                            None => continue, // If there's no responsible entity, we can't verify the sender, so ignore the message.
-                        };
-
-                        if let Some(message) = messages.receive::<E>(correlation_key) {
-                            return (responsible, message);
-                        }
-                    }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {

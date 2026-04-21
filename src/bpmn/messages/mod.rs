@@ -19,24 +19,27 @@ pub use self::message::{CorrelationKey, Message};
 pub use self::participant::{Context, Entity, Participant, Role};
 
 #[derive(Debug)]
-struct RawMessage {
+struct StoredMessage {
     _timestamp: DateTime<chrono::Utc>,
+    metadata: MessageMetaData,
     value: Box<dyn Any + Send + Sync>,
 }
 
-impl RawMessage {
-    pub fn new<T: Value>(value: T) -> Self {
-        RawMessage {
+impl StoredMessage {
+    pub fn new<T: Value>(metadata: MessageMetaData, value: T) -> Self {
+        StoredMessage {
             _timestamp: chrono::Utc::now(),
+            metadata,
             value: Box::new(value),
         }
     }
 }
 
-impl From<DynamicValue> for RawMessage {
-    fn from(value: DynamicValue) -> Self {
-        RawMessage {
+impl From<(MessageMetaData, DynamicValue)> for StoredMessage {
+    fn from((metadata, value): (MessageMetaData, DynamicValue)) -> Self {
+        StoredMessage {
             _timestamp: chrono::Utc::now(),
+            metadata,
             value: value.into(),
         }
     }
@@ -71,7 +74,7 @@ type SpawnCallback = dyn Fn(Entity, Box<dyn Any + 'static>) -> Result<InstanceId
 #[derive(Clone)]
 pub struct Messages {
     sender: Sender<MessageMetaData>,
-    data: Arc<DashMap<CorrelationKey, RawMessage>>,
+    data: Arc<DashMap<CorrelationKey, StoredMessage>>,
     dynamic_spawn: Option<(DynamicInput, Arc<SpawnCallback>)>,
     dynamic_send: Arc<DashMap<Step, DynamicInput>>,
 }
@@ -98,10 +101,14 @@ impl Messages {
     }
 
     /// Retrieves a typed message by key if present and of matching type.
-    pub fn receive<T: Value>(&self, key: CorrelationKey) -> Option<T> {
-        self.data
-            .get(&key)
-            .and_then(|entry| entry.value.downcast_ref::<T>().cloned())
+    pub fn receive<T: Value>(&self, key: CorrelationKey) -> Option<(MessageMetaData, T)> {
+        self.data.get(&key).and_then(|entry| {
+            entry
+                .value
+                .downcast_ref::<T>()
+                .cloned()
+                .map(|value| (entry.metadata.clone(), value))
+        })
     }
 
     /// Register a callback for sending dynamic input to waiting processes.
@@ -127,7 +134,7 @@ impl Messages {
         ));
     }
 
-    fn send_raw(&self, meta_data: MessageMetaData, value: RawMessage) {
+    fn send_raw(&self, meta_data: MessageMetaData, value: StoredMessage) {
         self.data.insert(meta_data.correlation_key, value);
         let _ = self.sender.send(meta_data);
     }
@@ -291,7 +298,7 @@ impl<P: Process, V: Value> Sendable for Message<P, V, CorrelationKey> {
 
     fn send(self, messages: &Messages) -> Self::Result {
         let (meta_data, value) = self.split();
-        messages.send_raw(meta_data, RawMessage::new(value));
+        messages.send_raw(meta_data.clone(), StoredMessage::new(meta_data, value));
     }
 }
 
@@ -316,7 +323,7 @@ impl Sendable for Message<Step, serde_json::Value, CorrelationKey> {
             .cast(value)
             .map_err(|_| MessageError::InvalidType)?;
 
-        messages.send_raw(meta_data, input.into());
+        messages.send_raw(meta_data.clone(), (meta_data, input).into());
         Ok(())
     }
 }

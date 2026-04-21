@@ -86,13 +86,7 @@ impl InMemory {
                 .history
                 .entries
                 .iter()
-                .flat_map(|typed_entries| {
-                    typed_entries
-                        .value()
-                        .iter()
-                        .map(|entry| entry.clone())
-                        .collect::<Vec<_>>()
-                })
+                .flat_map(|typed_entries| typed_entries.to_vec())
                 .collect()),
             None => Err(StorageError::NotFound),
         }?;

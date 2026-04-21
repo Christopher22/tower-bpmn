@@ -213,7 +213,7 @@ impl<P: Process, E: Value, S: Storage> ProcessBuilder<P, E, S> {
 
             let future: Pin<Box<dyn Future<Output = Vec<Token<S>>> + Send>> =
                 Box::pin(async move {
-                    let (entity, output) = waitable.wait_for(&mut token, value).await;
+                    let (entity, output) = waitable.wait_for(&token, value).await;
                     token.responsible = entity;
                     vec![token.set_output(name.clone(), output)]
                 });

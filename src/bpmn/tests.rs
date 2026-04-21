@@ -249,6 +249,38 @@ async fn incoming_message_waitable_ignores_other_correlation_keys() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn incoming_message_waitable_recovers_after_broadcast_lag() {
+    let mut steps = steps::StepsBuilder::default();
+    steps.add_start::<()>(Participant::Everyone).unwrap();
+    steps.add_end(Type::new::<()>());
+
+    let mut waitable = IncomingMessage::<DummyProcess, i32>::new(DummyProcess, "example");
+    let messages = MessageBroker::new();
+    waitable.register(&mut steps, &messages);
+    steps.build().unwrap();
+
+    let expected_message = Message::new(DummyProcess, 99_i32);
+    let expected_key = expected_message.correlation_key;
+    let wait_future = tokio::task::spawn(waitable.wait_for(
+        &mut Token::new(Entity::SYSTEM, InMemoryStorage::for_test()),
+        expected_key,
+    ));
+
+    tokio::task::yield_now().await;
+
+    messages.send(expected_message).unwrap();
+    for noise in 0..150 {
+        messages.send(Message::new(DummyProcess, noise)).unwrap();
+    }
+
+    let value = timeout(TokioDuration::from_secs(1), wait_future)
+        .await
+        .expect("waitable should resolve even after receiver lag")
+        .expect("task should complete successfully");
+    assert_eq!(value, (Entity::SYSTEM, 99));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn throw_message_and_wait_for_message_roundtrip() {
     let mut runtime: Runtime<crate::executor::TokioExecutor, InMemory> = Runtime::default();
     runtime
