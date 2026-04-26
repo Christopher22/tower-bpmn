@@ -20,6 +20,12 @@ impl Entity {
     }
 }
 
+impl AsRef<str> for Entity {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
 impl From<&'static str> for Entity {
     fn from(value: &'static str) -> Self {
         Entity(Cow::Borrowed(value))

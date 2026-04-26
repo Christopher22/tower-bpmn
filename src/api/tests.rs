@@ -165,6 +165,21 @@ fn build_restricted_api<G: Guard>(guard: G) -> Api<TokioExecutor, InMemory, G> {
     Api::builder("api", runtime).with_guard(guard).build()
 }
 
+fn build_api_with_exposed_wait_process<G: Guard>(
+    guard: G,
+    participant: Participant,
+) -> Api<TokioExecutor, InMemory, G> {
+    let mut runtime = Runtime::default();
+    runtime.register_process(StartProcess).unwrap();
+    runtime.register_process(MessageTarget).unwrap();
+    runtime.register_process(WaitProcess).unwrap();
+
+    Api::builder("api", runtime)
+        .with_guard(guard)
+        .with_exposed_steps(WaitProcess, participant)
+        .build()
+}
+
 fn get(path: &str) -> Request<Empty<bytes::Bytes>> {
     Request::builder()
         .method(Method::GET)
@@ -563,4 +578,150 @@ async fn openapi_includes_guard_security_scheme() {
     assert_eq!(status, StatusCode::OK);
     assert!(body["components"]["securitySchemes"]["ApiKeyAuth"].is_object());
     assert_eq!(body["security"][0]["ApiKeyAuth"], serde_json::json!([]));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn step_query_for_non_exposed_process_is_not_available() {
+    let mut api =
+        build_api_with_exposed_wait_process(crate::guards::EverybodyGuard, Participant::Everyone);
+
+    let (_, started) = call_json(
+        &mut api,
+        post(
+            "/api/processes/start-process-1/instances",
+            serde_json::json!(7),
+        ),
+    )
+    .await;
+    let instance_id = started["id"].as_str().unwrap();
+
+    let path = format!("/api/processes/start-process-1/steps/identity/history/{instance_id}");
+    let (status, body) = call_json(&mut api, get(&path)).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["message"], "route not found");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn step_query_requires_suitable_context() {
+    let mut api = build_api_with_exposed_wait_process(
+        crate::guards::EverybodyGuard,
+        Participant::Role(Role::new("admin")),
+    );
+
+    let correlation_key = CorrelationKey::new();
+    let (_, started) = call_json(
+        &mut api,
+        post(
+            "/api/processes/wait-process-1/instances",
+            serde_json::to_value(correlation_key).unwrap(),
+        ),
+    )
+    .await;
+    let instance_id = started["id"].as_str().unwrap();
+
+    let path = format!("/api/processes/wait-process-1/steps/Start/history/{instance_id}");
+    let (status, body) = call_json(&mut api, get(&path)).await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["message"], "not allowed for this participant");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn step_query_returns_correct_history_for_external_and_normal_steps() {
+    let mut api =
+        build_api_with_exposed_wait_process(RoleGuard, Participant::Role(Role::new("admin")));
+
+    let correlation_key = CorrelationKey::new();
+    let (_, started) = call_json(
+        &mut api,
+        post(
+            "/api/processes/wait-process-1/instances",
+            serde_json::to_value(correlation_key).unwrap(),
+        ),
+    )
+    .await;
+    let instance_id = started["id"].as_str().unwrap().to_string();
+
+    let message_path = format!("/api/processes/wait-process-1/steps/incoming/{correlation_key}");
+    let (message_status, _) = call_json(&mut api, post(&message_path, serde_json::json!(21))).await;
+    assert_eq!(message_status, StatusCode::ACCEPTED);
+
+    let incoming_history_path =
+        format!("/api/processes/wait-process-1/steps/incoming/history/{instance_id}");
+    let mut incoming_rows = Vec::new();
+    for _ in 0..20 {
+        let (incoming_status, incoming_body) =
+            call_json(&mut api, get(&incoming_history_path)).await;
+        assert_eq!(incoming_status, StatusCode::OK);
+        incoming_rows = incoming_body.as_array().unwrap().clone();
+        if !incoming_rows.is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(incoming_rows.len(), 1);
+    assert_eq!(incoming_rows[0]["output_value"], serde_json::json!(21));
+    assert!(incoming_rows[0]["timestamp"].is_string());
+    assert!(incoming_rows[0]["responsible"].is_string());
+
+    let normal_history_path =
+        format!("/api/processes/wait-process-1/steps/double/history/{instance_id}");
+    let mut normal_rows = Vec::new();
+    for _ in 0..20 {
+        let (normal_status, normal_body) = call_json(&mut api, get(&normal_history_path)).await;
+        assert_eq!(normal_status, StatusCode::OK);
+        normal_rows = normal_body.as_array().unwrap().clone();
+        if !normal_rows.is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(normal_rows.len(), 1);
+    assert_eq!(normal_rows[0]["output_value"], serde_json::json!(42));
+    assert!(normal_rows[0]["timestamp"].is_string());
+    assert!(normal_rows[0]["responsible"].is_string());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openapi_includes_exposed_step_query_paths_and_custom_output_value_schema() {
+    let mut api =
+        build_api_with_exposed_wait_process(crate::guards::EverybodyGuard, Participant::Everyone);
+
+    let (_, body) = call_json(&mut api, get("/api")).await;
+
+    assert!(
+        body["paths"]["/processes/wait-process-1/steps/incoming/history/{instance_id}"]["get"]
+            .is_object()
+    );
+    assert!(
+        body["paths"]["/processes/wait-process-1/steps/double/history/{instance_id}"]["get"]
+            .is_object()
+    );
+    assert!(
+        body["paths"]["/processes/start-process-1/steps/identity/history/{instance_id}"].is_null()
+    );
+
+    let incoming_schema_ref = &body["paths"]["/processes/wait-process-1/steps/incoming/history/{instance_id}"]
+        ["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"];
+    let incoming_schema_name = incoming_schema_ref
+        .as_str()
+        .unwrap()
+        .trim_start_matches("#/components/schemas/");
+    let incoming_schema = &body["components"]["schemas"][incoming_schema_name];
+    let incoming_output = &incoming_schema["items"]["properties"]["output_value"];
+    assert_eq!(incoming_output["type"], "integer");
+    assert!(incoming_schema["items"]["properties"]["output"].is_null());
+
+    let double_schema_ref = &body["paths"]["/processes/wait-process-1/steps/double/history/{instance_id}"]
+        ["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"];
+    let double_schema_name = double_schema_ref
+        .as_str()
+        .unwrap()
+        .trim_start_matches("#/components/schemas/");
+    let double_schema = &body["components"]["schemas"][double_schema_name];
+    let double_output = &double_schema["items"]["properties"]["output_value"];
+    assert_eq!(double_output["type"], "integer");
 }

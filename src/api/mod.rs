@@ -9,6 +9,7 @@ mod route;
 mod tests;
 
 use std::{
+    collections::HashMap,
     convert::Infallible,
     future::Future,
     pin::Pin,
@@ -25,7 +26,7 @@ use tower_service::Service;
 use self::error::Error;
 use self::guards::{EverybodyGuard, Guard};
 use crate::bpmn::{
-    ExtendedExecutor, Runtime,
+    ExtendedExecutor, MetaData, Process, Runtime,
     messages::{Context as MessageContext, Participant},
     storage::StorageBackend,
 };
@@ -35,6 +36,13 @@ use crate::bpmn::{
 pub struct Api<E: ExtendedExecutor<B::Storage>, B: StorageBackend, G: Guard = EverybodyGuard>(
     Arc<Inner<E, B, G>>,
 );
+
+impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend, G: Guard> Api<E, B, G> {
+    /// Returns a reference to the runtime wrapped by this API.
+    pub fn runtime(&self) -> impl std::ops::Deref<Target = Runtime<E, B>> {
+        self.0.runtime.read()
+    }
+}
 
 struct Inner<E: ExtendedExecutor<B::Storage>, B: StorageBackend, G: Guard> {
     entry_point: &'static str,
@@ -50,6 +58,7 @@ pub struct ApiBuilder<E: ExtendedExecutor<B::Storage>, B: StorageBackend, G: Gua
     routes: route::RouteBuilder<E, B>,
     expose_openapi: bool,
     guard: G,
+    exposed_processes: HashMap<MetaData, Participant>,
 }
 
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend, G: Guard> std::fmt::Debug
@@ -70,6 +79,7 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> ApiBuilder<E, B, Everyb
             routes,
             expose_openapi: true,
             guard: EverybodyGuard,
+            exposed_processes: HashMap::new(),
         }
     }
 }
@@ -86,12 +96,26 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend, G: Guard> ApiBuilder<E,
             routes: self.routes,
             expose_openapi: self.expose_openapi,
             guard,
+            exposed_processes: self.exposed_processes,
         }
     }
 
     /// Enables or disables automatic OpenAPI endpoint generation at path '/'.
     pub fn with_openapi(mut self, enabled: bool) -> Self {
         self.expose_openapi = enabled;
+        self
+    }
+
+    pub fn with_exposed_steps<P: Process>(
+        mut self,
+        process: P,
+        allowed_participant: Participant,
+    ) -> Self {
+        // By default, all processes are not exposed, so we only need to register explicitly exposed processes here.
+        if allowed_participant != Participant::Nobody {
+            self.exposed_processes
+                .insert(process.metadata().clone(), allowed_participant);
+        }
         self
     }
 
@@ -187,6 +211,12 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend, G: Guard> ApiBuilder<E,
 
     /// Finalizes the API service.
     pub fn build(mut self) -> Api<E, B, G> {
+        route::register_exposed_step_query_routes(
+            &mut self.routes,
+            &self.runtime,
+            &self.exposed_processes,
+        );
+
         let security_scheme = self.guard.openapi_security_scheme();
         if self.expose_openapi {
             // Register a placeholder first so '/' appears in the generated document itself.

@@ -2,7 +2,9 @@ use http::{Response, StatusCode};
 use serde::{Serialize, ser::SerializeStruct};
 
 use super::json_response;
-use crate::bpmn::{InstanceSpawnError, InvalidProcessNameError, messages::MessageError};
+use crate::bpmn::{
+    InstanceSpawnError, InvalidProcessNameError, messages::MessageError, storage::StorageError,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
@@ -121,5 +123,16 @@ impl From<InvalidProcessNameError> for Error {
 impl From<uuid::Error> for Error {
     fn from(error: uuid::Error) -> Self {
         Self::bad_request(format!("invalid instance id: {error}"))
+    }
+}
+
+impl From<StorageError> for Error {
+    fn from(error: StorageError) -> Self {
+        match error {
+            StorageError::NotFound => Self::not_found("instance not found"),
+            StorageError::ProcessMismatch => {
+                Self::bad_request("instance belongs to a different process")
+            }
+        }
     }
 }

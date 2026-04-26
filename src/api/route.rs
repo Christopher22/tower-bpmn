@@ -26,6 +26,8 @@ use crate::bpmn::{
 
 type GetCallback<E, B> =
     dyn Fn(&Runtime<E, B>, &Context) -> Result<serde_json::Value, Error> + Send + Sync;
+type GetPathCallback<E, B> =
+    dyn Fn(&Runtime<E, B>, &str, &Context) -> Result<serde_json::Value, Error> + Send + Sync;
 type PostCallback<E, B> = dyn Fn(&Runtime<E, B>, serde_json::Value, &Context) -> Result<serde_json::Value, Error>
     + Send
     + Sync;
@@ -58,6 +60,13 @@ impl SchemaDoc {
 
     fn from_component(name: &str) -> Self {
         Self::Ref(name.to_string())
+    }
+
+    fn component_with_schema(name: &str, schema: serde_json::Value) -> Self {
+        Self::Component {
+            name: name.to_string(),
+            schema,
+        }
     }
 }
 
@@ -144,9 +153,15 @@ struct MethodDoc {
 
 #[derive(Clone)]
 struct GetHandler<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
-    callback: Arc<GetCallback<E, B>>,
+    callback: GetHandlerCallback<E, B>,
     status: StatusCode,
     participant: Participant,
+}
+
+#[derive(Clone)]
+enum GetHandlerCallback<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
+    Static(Arc<GetCallback<E, B>>),
+    PathSegment(Arc<GetPathCallback<E, B>>),
 }
 
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> GetHandler<E, B> {
@@ -156,9 +171,9 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> GetHandler<E, B> {
         F: Fn(&Runtime<E, B>, &Context) -> Result<O, Error> + Send + Sync + 'static,
     {
         Self {
-            callback: Arc::new(move |runtime, context| {
+            callback: GetHandlerCallback::Static(Arc::new(move |runtime, context| {
                 callback(runtime, context).and_then(|value| serialize_json(&value))
-            }),
+            })),
             status: StatusCode::OK,
             participant,
         }
@@ -169,7 +184,21 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> GetHandler<E, B> {
         F: Fn(&Runtime<E, B>, &Context) -> Result<serde_json::Value, Error> + Send + Sync + 'static,
     {
         Self {
-            callback: Arc::new(callback),
+            callback: GetHandlerCallback::Static(Arc::new(callback)),
+            status,
+            participant,
+        }
+    }
+
+    fn json_with_path_segment<F>(status: StatusCode, callback: F, participant: Participant) -> Self
+    where
+        F: Fn(&Runtime<E, B>, &str, &Context) -> Result<serde_json::Value, Error>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            callback: GetHandlerCallback::PathSegment(Arc::new(callback)),
             status,
             participant,
         }
@@ -265,6 +294,26 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Method<E, B> {
         F: Fn(&Runtime<E, B>, &Context) -> Result<serde_json::Value, Error> + Send + Sync + 'static,
     {
         self.get = Some(GetHandler::json(status, callback, participant));
+        self.doc.get = doc;
+    }
+
+    fn set_get_json_with_path_segment<F>(
+        &mut self,
+        status: StatusCode,
+        callback: F,
+        participant: Participant,
+        doc: Option<OperationDoc>,
+    ) where
+        F: Fn(&Runtime<E, B>, &str, &Context) -> Result<serde_json::Value, Error>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.get = Some(GetHandler::json_with_path_segment(
+            status,
+            callback,
+            participant,
+        ));
         self.doc.get = doc;
     }
 
@@ -379,7 +428,14 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Method<E, B> {
                 }
                 let value = {
                     let runtime = runtime.read();
-                    (handler.callback)(&runtime, context)?
+                    match &handler.callback {
+                        GetHandlerCallback::Static(callback) => callback(&runtime, context)?,
+                        GetHandlerCallback::PathSegment(callback) => {
+                            let segment =
+                                path_segment.ok_or_else(|| Error::not_found("route not found"))?;
+                            callback(&runtime, segment, context)?
+                        }
+                    }
                 };
                 Ok(json_response(handler.status, &value))
             }
@@ -644,6 +700,25 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RouteBuilder<E, B> {
             .set_get_json(status, callback, participant, Some(doc));
     }
 
+    /// Registers a documented JSON GET endpoint using one dynamic final path segment.
+    pub(super) fn add_get_json_doc_with_path_segment<F>(
+        &mut self,
+        path: &str,
+        participant: Participant,
+        status: StatusCode,
+        callback: F,
+        doc: OperationDoc,
+    ) where
+        F: Fn(&Runtime<E, B>, &str, &Context) -> Result<serde_json::Value, Error>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let node = self.route_mut(path);
+        let fallback = node.fallback.get_or_insert_with(Method::default);
+        fallback.set_get_json_with_path_segment(status, callback, participant, Some(doc));
+    }
+
     /// Registers a documented JSON POST endpoint used for automatic OpenAPI generation.
     pub(super) fn add_post_json_doc<F>(
         &mut self,
@@ -757,6 +832,133 @@ pub(super) fn register_runtime_routes<E: ExtendedExecutor<B::Storage>, B: Storag
             );
         }
     }
+}
+
+/// Registers read-only step history endpoints for explicitly exposed processes.
+pub(super) fn register_exposed_step_query_routes<
+    E: ExtendedExecutor<B::Storage>,
+    B: StorageBackend,
+>(
+    routes: &mut RouteBuilder<E, B>,
+    runtime: &Runtime<E, B>,
+    exposed_processes: &HashMap<MetaData, Participant>,
+) {
+    for process in runtime.registered_processes() {
+        let Some(participant) = exposed_processes.get(&process.meta_data) else {
+            continue;
+        };
+
+        let process_name = ProcessName::from(&process.meta_data);
+
+        for step_name in process.steps.steps() {
+            let Some(step) = process.steps.get(step_name) else {
+                continue;
+            };
+
+            let response_schema_name = format!(
+                "FinishedSteps_{}_{}",
+                process_name,
+                step.as_str().replace('-', "_")
+            );
+            let output_schema = step.output().schema.as_value().clone();
+            let response_schema = finished_steps_schema_for_output(&output_schema);
+
+            let history_base_path = format!("/processes/{process_name}/steps/{step_name}/history");
+            let step_for_query = step.clone();
+            let process_name_for_query = process_name.clone();
+            routes.add_get_json_doc_with_path_segment(
+                &history_base_path,
+                participant.clone(),
+                StatusCode::OK,
+                move |runtime, instance_id, _| {
+                    let instance_id: InstanceId = instance_id.parse()?;
+                    let registered = runtime
+                        .get_registered_process(&process_name_for_query)
+                        .ok_or_else(|| Error::not_found("unknown process"))?;
+                    let rows = runtime.storage_backend.query(
+                        registered,
+                        step_for_query.clone(),
+                        instance_id,
+                    )?;
+                    let response_rows = rows
+                        .into_iter()
+                        .map(FinishedStepResponse::from_storage)
+                        .collect::<Vec<_>>();
+                    serialize_json(&response_rows)
+                },
+                OperationDoc::new(
+                    "List finished step entries for one process instance",
+                    [ParameterDoc::path(
+                        "instance_id",
+                        "Process instance id",
+                        SchemaDoc::component::<InstanceId>("InstanceId"),
+                    )],
+                    None,
+                    [
+                        (
+                            StatusCode::OK,
+                            ResponseDoc::new(
+                                "Step execution history",
+                                SchemaDoc::component_with_schema(
+                                    &response_schema_name,
+                                    response_schema,
+                                ),
+                            ),
+                        ),
+                        (
+                            StatusCode::BAD_REQUEST,
+                            ResponseDoc::new("Invalid request", SchemaDoc::from_component("Error")),
+                        ),
+                        (
+                            StatusCode::NOT_FOUND,
+                            ResponseDoc::new(
+                                "Unknown instance",
+                                SchemaDoc::from_component("Error"),
+                            ),
+                        ),
+                    ],
+                ),
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FinishedStepResponse {
+    timestamp: chrono::DateTime<chrono::Utc>,
+    responsible: crate::bpmn::messages::Entity,
+    output_value: serde_json::Value,
+}
+
+impl FinishedStepResponse {
+    fn from_storage(step: crate::bpmn::storage::FinishedStep) -> Self {
+        Self {
+            timestamp: step.timestamp,
+            responsible: step.responsible,
+            output_value: step.output,
+        }
+    }
+}
+
+fn finished_steps_schema_for_output(output_schema: &serde_json::Value) -> serde_json::Value {
+    schemars::json_schema!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "timestamp": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "The datetime when the step was finished."
+                },
+                "responsible": schema_for::<crate::bpmn::messages::Entity>(),
+                "output_value": output_schema.clone()
+            },
+            "required": ["timestamp", "responsible", "output_value"],
+            "additionalProperties": false
+        }
+    })
+    .into()
 }
 
 /// Registers the generated OpenAPI endpoint at root.
