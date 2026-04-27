@@ -12,11 +12,11 @@ use serde::Serialize;
 use super::{
     error::Error,
     json_response,
-    xml_response,
     openapi::{
         OpenApiOperationData, OpenApiParameterData, OpenApiPathData, OpenApiResponseData,
         OpenApiRouteData,
     },
+    xml_response,
 };
 use crate::bpmn::{
     ExtendedExecutor, Instance, InstanceId, Instances, MetaData, ProcessName, RegisteredProcess,
@@ -29,8 +29,7 @@ type GetCallback<E, B> =
     dyn Fn(&Runtime<E, B>, &Context) -> Result<serde_json::Value, Error> + Send + Sync;
 type GetPathCallback<E, B> =
     dyn Fn(&Runtime<E, B>, &str, &Context) -> Result<serde_json::Value, Error> + Send + Sync;
-type GetXmlCallback<E, B> =
-    dyn Fn(&Runtime<E, B>, &Context) -> Result<String, Error> + Send + Sync;
+type GetXmlCallback<E, B> = dyn Fn(&Runtime<E, B>, &Context) -> Result<String, Error> + Send + Sync;
 type PostCallback<E, B> = dyn Fn(&Runtime<E, B>, serde_json::Value, &Context) -> Result<serde_json::Value, Error>
     + Send
     + Sync;
@@ -342,12 +341,8 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Method<E, B> {
         self.doc.get = doc;
     }
 
-    fn set_get_xml<F>(
-        &mut self,
-        callback: F,
-        participant: Participant,
-        doc: Option<OperationDoc>,
-    ) where
+    fn set_get_xml<F>(&mut self, callback: F, participant: Participant, doc: Option<OperationDoc>)
+    where
         F: Fn(&Runtime<E, B>, &Context) -> Result<String, Error> + Send + Sync + 'static,
     {
         self.get = Some(GetHandler::xml(callback, participant));
