@@ -2,6 +2,7 @@ use std::{any::TypeId, sync::Arc};
 
 use serde::Serialize;
 
+use super::xml;
 use crate::bpmn::{
     BpmnStep, ExtendedExecutor, MetaData, Process, ProcessBuilder, ProcessError, ProcessName,
     State, Step, Steps, Token, Value, messages::Entity, runtime::DynamicInput,
@@ -25,7 +26,7 @@ pub struct RegisteredProcess<B: StorageBackend> {
     #[serde(skip)]
     pub(crate) process_type: TypeId,
     #[serde(skip)]
-    petri_net: PetriNetRef<B::Storage>,
+    pub(crate) petri_net: PetriNetRef<B::Storage>,
     #[serde(skip)]
     input: DynamicInput,
 }
@@ -48,6 +49,11 @@ impl<B: StorageBackend> RegisteredProcess<B> {
             input: DynamicInput::new::<P::Input>(steps.start()),
             steps,
         }
+    }
+
+    /// Export valid BPMN 2.0 XML for this process.
+    pub fn bpmn(&self) -> String {
+        xml::export(self)
     }
 
     /// Checks if the process matches the given type.

@@ -4,6 +4,7 @@ mod instances;
 mod registered_process;
 pub mod storage;
 mod token;
+mod xml;
 
 use serde_json::Value as JsonValue;
 use std::{collections::HashMap, sync::Arc};

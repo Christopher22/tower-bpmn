@@ -12,6 +12,7 @@ use serde::Serialize;
 use super::{
     error::Error,
     json_response,
+    xml_response,
     openapi::{
         OpenApiOperationData, OpenApiParameterData, OpenApiPathData, OpenApiResponseData,
         OpenApiRouteData,
@@ -28,6 +29,8 @@ type GetCallback<E, B> =
     dyn Fn(&Runtime<E, B>, &Context) -> Result<serde_json::Value, Error> + Send + Sync;
 type GetPathCallback<E, B> =
     dyn Fn(&Runtime<E, B>, &str, &Context) -> Result<serde_json::Value, Error> + Send + Sync;
+type GetXmlCallback<E, B> =
+    dyn Fn(&Runtime<E, B>, &Context) -> Result<String, Error> + Send + Sync;
 type PostCallback<E, B> = dyn Fn(&Runtime<E, B>, serde_json::Value, &Context) -> Result<serde_json::Value, Error>
     + Send
     + Sync;
@@ -75,6 +78,7 @@ impl SchemaDoc {
 struct ResponseDoc {
     description: &'static str,
     schema: SchemaDoc,
+    content_type: &'static str,
 }
 
 impl ResponseDoc {
@@ -82,6 +86,15 @@ impl ResponseDoc {
         Self {
             description,
             schema,
+            content_type: "application/json",
+        }
+    }
+
+    fn xml(description: &'static str, schema: SchemaDoc) -> Self {
+        Self {
+            description,
+            schema,
+            content_type: "text/xml",
         }
     }
 }
@@ -162,6 +175,7 @@ struct GetHandler<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
 enum GetHandlerCallback<E: ExtendedExecutor<B::Storage>, B: StorageBackend> {
     Static(Arc<GetCallback<E, B>>),
     PathSegment(Arc<GetPathCallback<E, B>>),
+    Xml(Arc<GetXmlCallback<E, B>>),
 }
 
 impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> GetHandler<E, B> {
@@ -200,6 +214,17 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> GetHandler<E, B> {
         Self {
             callback: GetHandlerCallback::PathSegment(Arc::new(callback)),
             status,
+            participant,
+        }
+    }
+
+    fn xml<F>(callback: F, participant: Participant) -> Self
+    where
+        F: Fn(&Runtime<E, B>, &Context) -> Result<String, Error> + Send + Sync + 'static,
+    {
+        Self {
+            callback: GetHandlerCallback::Xml(Arc::new(callback)),
+            status: StatusCode::OK,
             participant,
         }
     }
@@ -314,6 +339,18 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Method<E, B> {
             callback,
             participant,
         ));
+        self.doc.get = doc;
+    }
+
+    fn set_get_xml<F>(
+        &mut self,
+        callback: F,
+        participant: Participant,
+        doc: Option<OperationDoc>,
+    ) where
+        F: Fn(&Runtime<E, B>, &Context) -> Result<String, Error> + Send + Sync + 'static,
+    {
+        self.get = Some(GetHandler::xml(callback, participant));
         self.doc.get = doc;
     }
 
@@ -434,6 +471,10 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> Method<E, B> {
                             let segment =
                                 path_segment.ok_or_else(|| Error::not_found("route not found"))?;
                             callback(&runtime, segment, context)?
+                        }
+                        GetHandlerCallback::Xml(callback) => {
+                            let xml = callback(&runtime, context)?;
+                            return Ok(xml_response(handler.status, xml));
                         }
                     }
                 };
@@ -762,6 +803,20 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RouteBuilder<E, B> {
         fallback.set_post_json_with_path_segment(status, callback, participant, Some(doc));
     }
 
+    /// Registers a documented XML GET endpoint used for automatic OpenAPI generation.
+    pub(super) fn add_get_xml_doc<F>(
+        &mut self,
+        path: &str,
+        participant: Participant,
+        callback: F,
+        doc: OperationDoc,
+    ) where
+        F: Fn(&Runtime<E, B>, &Context) -> Result<String, Error> + Send + Sync + 'static,
+    {
+        let node = self.route_mut(path);
+        node.methods.set_get_xml(callback, participant, Some(doc));
+    }
+
     /// Finalizes the route tree.
     pub(super) fn build(self) -> Route<E, B> {
         self.root
@@ -831,6 +886,31 @@ pub(super) fn register_runtime_routes<E: ExtendedExecutor<B::Storage>, B: Storag
                 external_step.input.schema.as_value(),
             );
         }
+
+        let bpmn_path = format!("/processes/{process_name}/bpmn");
+        let process_name_bpmn = process_name.clone();
+        routes.add_get_xml_doc(
+            &bpmn_path,
+            Participant::Everyone,
+            move |runtime, _| {
+                let registered = runtime
+                    .get_registered_process(&process_name_bpmn)
+                    .ok_or_else(|| Error::not_found("unknown process"))?;
+                Ok(registered.bpmn())
+            },
+            OperationDoc::new(
+                "Get BPMN 2.0 process definition as XML",
+                [],
+                None,
+                [(
+                    StatusCode::OK,
+                    ResponseDoc::xml(
+                        "BPMN 2.0 XML",
+                        SchemaDoc::inline(serde_json::json!({"type": "string"})),
+                    ),
+                )],
+            ),
+        );
     }
 }
 
@@ -1192,6 +1272,7 @@ fn operation_to_openapi(
                     status.to_string(),
                     OpenApiResponseData {
                         description: response.description,
+                        content_type: response.content_type,
                         content,
                     },
                 )

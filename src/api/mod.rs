@@ -340,3 +340,11 @@ pub(super) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Resp
         .body(body)
         .unwrap_or_else(|_| Response::new("{\"error\":\"failed to build response\"}".to_string()))
 }
+
+pub(super) fn xml_response(status: StatusCode, body: String) -> Response<String> {
+    Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, "application/xml")
+        .body(body)
+        .unwrap_or_else(|_| Response::new(String::new()))
+}

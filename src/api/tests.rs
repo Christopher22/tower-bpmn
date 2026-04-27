@@ -725,3 +725,20 @@ async fn openapi_includes_exposed_step_query_paths_and_custom_output_value_schem
     let double_output = &double_schema["items"]["properties"]["output_value"];
     assert_eq!(double_output["type"], "integer");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn bpmn_xml_is_available_for_registered_processes() {
+    let mut api = build_api();
+
+    let request = get("/api/processes/start-process-1/bpmn");
+    let response = Service::call(&mut api, request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/xml"
+    );
+    let body = response.body();
+    assert!(body.contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+    assert!(body.contains("<bpmn:process "));
+}

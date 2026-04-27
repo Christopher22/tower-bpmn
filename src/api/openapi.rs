@@ -42,6 +42,7 @@ pub(super) struct OpenApiParameterData {
 /// Response metadata that will be rendered to OpenAPI.
 pub(super) struct OpenApiResponseData {
     pub(super) description: &'static str,
+    pub(super) content_type: &'static str,
     pub(super) content: Option<serde_json::Value>,
 }
 
@@ -101,10 +102,12 @@ struct OpenApiResponse {
     content: Option<OpenApiContent>,
 }
 
-#[derive(Serialize)]
-struct OpenApiContent {
-    #[serde(rename = "application/json")]
-    application_json: OpenApiMediaType,
+struct OpenApiContent(BTreeMap<String, OpenApiMediaType>);
+
+impl Serialize for OpenApiContent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
 }
 
 #[derive(Serialize)]
@@ -195,7 +198,7 @@ fn render_operation(operation: OpenApiOperationData) -> Operation {
             .collect(),
         request_body: operation.request_body.map(|schema| OpenApiRequestBody {
             required: true,
-            content: json_content(schema),
+            content: typed_content("application/json", schema),
         }),
         security: if operation.is_public {
             Some(Vec::new())
@@ -208,12 +211,14 @@ fn render_operation(operation: OpenApiOperationData) -> Operation {
 fn render_response(response: OpenApiResponseData) -> OpenApiResponse {
     OpenApiResponse {
         description: response.description,
-        content: response.content.map(json_content),
+        content: response
+            .content
+            .map(|schema| typed_content(response.content_type, schema)),
     }
 }
 
-fn json_content(schema: serde_json::Value) -> OpenApiContent {
-    OpenApiContent {
-        application_json: OpenApiMediaType { schema },
-    }
+fn typed_content(content_type: &str, schema: serde_json::Value) -> OpenApiContent {
+    let mut map = BTreeMap::new();
+    map.insert(content_type.to_string(), OpenApiMediaType { schema });
+    OpenApiContent(map)
 }
