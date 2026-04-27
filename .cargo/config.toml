@@ -1,0 +1,3 @@
+[alias]
+pg-reset = "run --bin pg_task -- reset-postgres"
+pg-test-postgres = "run --bin pg_task -- test-postgres"

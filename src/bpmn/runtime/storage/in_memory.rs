@@ -37,7 +37,7 @@ impl Entry {
         }
     }
 
-    fn serialize_json_impl<V: Value>(value: &(dyn Any)) -> JsonValue {
+    fn serialize_json_impl<V: Value>(value: &dyn Any) -> JsonValue {
         let typed = value.downcast_ref::<V>().expect("checked type");
         serde_json::to_value(typed).expect("value must serialize")
     }

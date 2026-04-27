@@ -1,6 +1,8 @@
 //! Storages backends for process instances, which can be used to store token values and other data related to the instance.
 
 mod in_memory;
+#[cfg(feature = "postgres")]
+mod postgres;
 mod sqlite;
 
 use serde_json::Value as JsonValue;
@@ -12,6 +14,8 @@ use crate::bpmn::{
 use crate::petri_net::{Id, Place};
 
 pub use self::in_memory::{InMemory, InMemoryStorage};
+#[cfg(feature = "postgres")]
+pub use self::postgres::{Postgres, PostgresError, PostgresStorage};
 pub use self::sqlite::{Sqlite, SqliteError, SqliteStorage};
 
 /// A finished step in the process history, which can be used for auditing and debugging purposes.

@@ -1,6 +1,6 @@
 [package]
 name = "tower-bpmn"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85"
 description = "BPMN runtime for custom backends built on Tower"
@@ -8,6 +8,10 @@ license = "MIT"
 keywords = ["bpmn", "workflow", "axum", "tower", "orchestration"]
 categories = ["asynchronous", "web-programming"]
 repository = "https://github.com/Christopher22/tower-bpmn"
+
+[features]
+default = []
+postgres = ["dep:postgres", "dep:r2d2", "dep:r2d2_postgres"]
 
 [dependencies]
 base64 = "0.22.1"
@@ -24,6 +28,9 @@ schemars = { version = "1.0.4", features = ["chrono04", "uuid1"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
+r2d2 = { version = "0.8.10", optional = true }
+r2d2_postgres = { version = "0.18.2", optional = true }
+postgres = { version = "0.19.12", optional = true, features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 tokio = { version = "1.49.0", features = ["rt", "macros", "time", "sync", "net", "rt-multi-thread"] }
 tower-service = "0.3.3"
 uuid = { version = "1.21.0", features = ["v4", "serde"] }
