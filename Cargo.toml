@@ -1,6 +1,6 @@
 [package]
 name = "tower-bpmn"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.85"
 description = "BPMN runtime for custom backends built on Tower"
@@ -12,9 +12,11 @@ repository = "https://github.com/Christopher22/tower-bpmn"
 [features]
 default = []
 postgres = ["dep:postgres", "dep:r2d2", "dep:r2d2_postgres"]
+oidc = ["dep:jsonwebtoken"]
 
 [dependencies]
 base64 = "0.22.1"
+jsonwebtoken = { version = "9", optional = true }
 chrono = { version = "0.4.43", features = ["serde"] }
 bytes = "1.10.1"
 dashmap = "6.1.0"

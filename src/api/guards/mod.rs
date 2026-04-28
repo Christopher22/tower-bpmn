@@ -1,8 +1,12 @@
 //! Guards for deriving context from incoming HTTP requests.
 
 mod authorization;
+#[cfg(feature = "oidc")]
+mod oidc;
 
 pub use authorization::AuthorizationGuard;
+#[cfg(feature = "oidc")]
+pub use oidc::OidcGuard;
 
 use http::request::Parts;
 
