@@ -8,7 +8,9 @@ use serde_json::Value as JsonValue;
 use crate::bpmn::{
     InstanceId, ProcessName, RegisteredProcess, Step, Steps, Token, TokenId, Value,
     messages::Entity,
-    storage::{FinishedStep, ResumableProcess, Storage, StorageBackend, StorageError},
+    storage::{
+        FinishedStep, InstanceDetails, ResumableProcess, Storage, StorageBackend, StorageError,
+    },
 };
 
 /// Errors emitted while opening or preparing SQLite storage.
@@ -224,6 +226,103 @@ impl StorageBackend for Sqlite {
         });
 
         Ok(finished_steps)
+    }
+
+    fn query_all(
+        &self,
+        process: &RegisteredProcess<Self>,
+    ) -> Result<Vec<InstanceDetails>, StorageError> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "
+                WITH target_process AS (
+                    SELECT id
+                    FROM processes
+                    WHERE name = ?1 AND version = ?2
+                ),
+                latest_per_instance AS (
+                    SELECT f.instance_id, MAX(f.id) AS max_id
+                    FROM finished_steps f
+                    JOIN instances i ON i.id = f.instance_id
+                    JOIN target_process p ON p.id = i.process_id
+                    GROUP BY f.instance_id
+                )
+                SELECT f.instance_id, s.step_name, f.value_json, f.timestamp, e.name
+                FROM latest_per_instance l
+                JOIN finished_steps f ON f.id = l.max_id
+                JOIN steps s ON s.id = f.step_id
+                LEFT JOIN entities e ON e.id = f.entity_id
+                ORDER BY f.id ASC
+                ",
+            )?;
+
+            Ok(statement
+                .query_map(
+                    params![process.meta_data.name.as_ref(), process.meta_data.version],
+                    |row| {
+                        let (
+                            instance_id_raw,
+                            step_name,
+                            value_json_raw,
+                            timestamp_raw,
+                            entity_name,
+                        ) = (
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        );
+
+                        let Ok(instance_id) = instance_id_raw.parse() else {
+                            return Err(rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                "invalid instance id in database".into(),
+                            ));
+                        };
+                        let Some(step) = process.steps.get(&step_name) else {
+                            return Err(rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                "invalid step name in database".into(),
+                            ));
+                        };
+
+                        let output = serde_json::from_str::<JsonValue>(&value_json_raw)
+                            .unwrap_or(JsonValue::Null);
+                        let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_raw)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .or_else(|_| {
+                                chrono::NaiveDateTime::parse_from_str(
+                                    &timestamp_raw,
+                                    "%Y-%m-%d %H:%M:%S%.f",
+                                )
+                                .map(|naive| {
+                                    chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                                        naive,
+                                        chrono::Utc,
+                                    )
+                                })
+                            })
+                            .unwrap_or_else(|_| chrono::Utc::now());
+
+                        Ok(InstanceDetails {
+                            instance_id,
+                            step,
+                            data: FinishedStep {
+                                timestamp,
+                                responsible: entity_name
+                                    .map(Entity::from)
+                                    .unwrap_or(Entity::SYSTEM),
+                                output,
+                            },
+                        })
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err: rusqlite::Error| StorageError::BackendError(err.to_string())))
+        })
     }
 
     fn new_instance(
@@ -1432,5 +1531,95 @@ mod tests {
         assert_eq!(finished_steps.len(), 1);
         assert_eq!(finished_steps[0].output, serde_json::json!(42));
         assert_eq!(finished_steps[0].responsible, Entity::SYSTEM);
+    }
+
+    #[test]
+    fn sqlite_query_all_returns_latest_state_per_instance() {
+        let backend = Sqlite::in_memory().expect("in-memory sqlite should be available");
+        let mut runtime = Runtime::new(TokioExecutor, backend.clone());
+        runtime
+            .register_process(SqliteDraftProcess)
+            .expect("draft process registration must succeed");
+        runtime
+            .register_process(SqliteComplexProcess)
+            .expect("complex process registration must succeed");
+
+        let draft_name = ProcessName::from(SqliteDraftProcess.metadata());
+        let complex_name = ProcessName::from(SqliteComplexProcess.metadata());
+        let draft = runtime
+            .get_registered_process(&draft_name)
+            .expect("draft process must exist");
+        let complex = runtime
+            .get_registered_process(&complex_name)
+            .expect("complex process must exist");
+
+        let draft_step = draft
+            .steps
+            .get("identity")
+            .expect("identity step must exist");
+        let complex_step = complex
+            .steps
+            .get("prepare")
+            .expect("prepare step must exist");
+
+        let draft_a: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+        let draft_b: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+        let complex_instance: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+
+        let draft_storage_a = backend.new_instance(draft, draft_a);
+        let draft_storage_b = backend.new_instance(draft, draft_b);
+        let complex_storage = backend.new_instance(complex, complex_instance);
+
+        let draft_token_a = Token::new(Entity::SYSTEM, draft_storage_a.clone());
+        let draft_token_b = Token::new(Entity::SYSTEM, draft_storage_b.clone());
+        let complex_token = Token::new(Entity::SYSTEM, complex_storage.clone());
+
+        draft_storage_a.add(
+            &Entity::SYSTEM,
+            draft_token_a.id(),
+            draft_step.clone(),
+            10_i32,
+        );
+        draft_storage_a.add(
+            &Entity::SYSTEM,
+            draft_token_a.id(),
+            draft_step.clone(),
+            20_i32,
+        );
+        draft_storage_b.add(
+            &Entity::SYSTEM,
+            draft_token_b.id(),
+            draft_step.clone(),
+            30_i32,
+        );
+        complex_storage.add(&Entity::SYSTEM, complex_token.id(), complex_step, 99_i32);
+
+        let all = backend.query_all(draft).expect("query_all must succeed");
+
+        assert_eq!(all.len(), 2);
+
+        let row_a = all
+            .iter()
+            .find(|row| row.instance_id == draft_a)
+            .expect("draft instance a must be present");
+        let row_b = all
+            .iter()
+            .find(|row| row.instance_id == draft_b)
+            .expect("draft instance b must be present");
+
+        assert_eq!(row_a.step.as_str(), draft_step.as_str());
+        assert_eq!(row_a.data.output, serde_json::json!(20));
+        assert_eq!(row_b.step.as_str(), draft_step.as_str());
+        assert_eq!(row_b.data.output, serde_json::json!(30));
+        assert!(all.iter().all(|row| row.instance_id != complex_instance));
     }
 }

@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 use crate::bpmn::{
     InstanceId, ProcessName, RegisteredProcess, Step, Storage, TokenId, Value,
     messages::Entity,
-    storage::{FinishedStep, ResumableProcess, StorageBackend, StorageError},
+    storage::{FinishedStep, InstanceDetails, ResumableProcess, StorageBackend, StorageError},
     value::internal::DynValue,
 };
 
@@ -144,6 +144,68 @@ impl StorageBackend for InMemory {
                 output,
             })
             .collect())
+    }
+
+    fn query_all(
+        &self,
+        process: &RegisteredProcess<Self>,
+    ) -> Result<Vec<InstanceDetails>, StorageError> {
+        let expected_process = ProcessName::from(&process.meta_data);
+
+        let mut details = self
+            .0
+            .iter()
+            .filter_map(|instance| {
+                if instance.value().process_name != expected_process {
+                    return None;
+                }
+
+                let latest = instance
+                    .value()
+                    .history
+                    .entries
+                    .iter()
+                    .flat_map(|typed_entries| {
+                        typed_entries
+                            .value()
+                            .iter()
+                            .map(|entry| {
+                                (
+                                    entry.timestamp,
+                                    entry.place.clone(),
+                                    entry.responsible.clone(),
+                                    (entry.serialize_json)(entry.value.as_ref()),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .max_by_key(|(timestamp, _, _, _)| *timestamp)?;
+
+                Some(InstanceDetails {
+                    instance_id: instance.key().clone(),
+                    step: latest.1,
+                    data: FinishedStep {
+                        timestamp: latest.0,
+                        responsible: latest.2,
+                        output: latest.3,
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+
+        // Keep output deterministic for tests and API consumers.
+        details.sort_by(|left, right| {
+            left.data
+                .timestamp
+                .cmp(&right.data.timestamp)
+                .then_with(|| {
+                    left.instance_id
+                        .to_string()
+                        .cmp(&right.instance_id.to_string())
+                })
+        });
+
+        Ok(details)
     }
 
     fn new_instance(
@@ -448,5 +510,125 @@ mod tests {
 
         // Verify timestamps are present and ordered
         assert!(finished_steps[0].timestamp <= finished_steps[1].timestamp);
+    }
+
+    #[test]
+    fn in_memory_query_all_returns_latest_state_per_instance() {
+        let backend = InMemory::default();
+        let mut runtime = Runtime::new(TokioExecutor, backend.clone());
+        runtime
+            .register_process(InMemoryQueryProcess)
+            .expect("process registration must succeed");
+
+        let process_name = ProcessName::from(InMemoryQueryProcess.metadata());
+        let registered = runtime
+            .get_registered_process(&process_name)
+            .expect("registered process must exist");
+        let step = registered
+            .steps
+            .get("identity")
+            .expect("identity step must exist");
+
+        let instance_a: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+        let instance_b: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+
+        let storage_a = backend.new_instance(registered, instance_a);
+        let storage_b = backend.new_instance(registered, instance_b);
+
+        let token_a = Token::new(Entity::SYSTEM, storage_a.clone());
+        let token_b = Token::new(Entity::SYSTEM, storage_b.clone());
+
+        storage_a.add(&Entity::SYSTEM, token_a.id(), step.clone(), 10_i32);
+        storage_a.add(&Entity::SYSTEM, token_a.id(), step.clone(), 20_i32);
+        storage_b.add(&Entity::SYSTEM, token_b.id(), step.clone(), 30_i32);
+
+        let all = backend
+            .query_all(registered)
+            .expect("query_all must succeed");
+
+        assert_eq!(all.len(), 2);
+
+        let row_a = all
+            .iter()
+            .find(|row| row.instance_id == instance_a)
+            .expect("instance a must be present");
+        let row_b = all
+            .iter()
+            .find(|row| row.instance_id == instance_b)
+            .expect("instance b must be present");
+
+        assert_eq!(row_a.step.as_str(), step.as_str());
+        assert_eq!(row_a.data.output, serde_json::json!(20));
+        assert_eq!(row_b.step.as_str(), step.as_str());
+        assert_eq!(row_b.data.output, serde_json::json!(30));
+    }
+
+    #[test]
+    fn in_memory_query_all_filters_other_processes() {
+        let backend = InMemory::default();
+        let mut runtime = Runtime::new(TokioExecutor, backend.clone());
+        runtime
+            .register_process(InMemoryQueryProcess)
+            .expect("first process registration must succeed");
+        runtime
+            .register_process(InMemoryOtherProcess)
+            .expect("second process registration must succeed");
+
+        let process_name = ProcessName::from(InMemoryQueryProcess.metadata());
+        let other_process_name = ProcessName::from(InMemoryOtherProcess.metadata());
+        let registered = runtime
+            .get_registered_process(&process_name)
+            .expect("registered process must exist");
+        let other_registered = runtime
+            .get_registered_process(&other_process_name)
+            .expect("other registered process must exist");
+
+        let first_step = registered
+            .steps
+            .get("identity")
+            .expect("identity step must exist");
+        let other_step = other_registered
+            .steps
+            .get("identity")
+            .expect("other identity step must exist");
+
+        let first_instance: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+        let other_instance: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+
+        let storage = backend.new_instance(registered, first_instance);
+        storage.add(
+            &Entity::SYSTEM,
+            Token::new(Entity::SYSTEM, storage.clone()).id(),
+            first_step,
+            7_i32,
+        );
+
+        let other_storage = backend.new_instance(other_registered, other_instance);
+        other_storage.add(
+            &Entity::SYSTEM,
+            Token::new(Entity::SYSTEM, other_storage.clone()).id(),
+            other_step,
+            8_i32,
+        );
+
+        let all = backend
+            .query_all(registered)
+            .expect("query_all must succeed");
+
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].instance_id, first_instance);
+        assert_eq!(all[0].data.output, serde_json::json!(7));
     }
 }

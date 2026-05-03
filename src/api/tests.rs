@@ -683,6 +683,81 @@ async fn openapi_includes_exposed_step_query_paths_and_custom_output_value_schem
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn exposed_instances_route_overrides_only_exposed_processes_and_updates_openapi() {
+    let mut api =
+        build_api_with_exposed_wait_process(RoleGuard, Participant::Role(Role::new("admin")));
+
+    let correlation_key = CorrelationKey::new();
+    let (_, started_wait) = call_json(
+        &mut api,
+        post(
+            "/api/wait-process-1/instances",
+            serde_json::to_value(correlation_key).unwrap(),
+        ),
+    )
+    .await;
+    let wait_instance_id = started_wait["id"].as_str().unwrap().to_string();
+
+    let (_, started_start) = call_json(
+        &mut api,
+        post("/api/start-process-1/instances", serde_json::json!(7)),
+    )
+    .await;
+    let start_instance_id = started_start["id"].as_str().unwrap().to_string();
+
+    let (wait_status, wait_body) = call_json(&mut api, get("/api/wait-process-1/instances")).await;
+    assert_eq!(wait_status, StatusCode::OK);
+    let wait_rows = wait_body
+        .as_array()
+        .expect("exposed instances endpoint must return an array");
+    assert!(
+        wait_rows
+            .iter()
+            .any(|row| row["instance_id"] == wait_instance_id)
+    );
+    assert!(
+        wait_rows
+            .iter()
+            .find(|row| row["instance_id"] == wait_instance_id)
+            .is_some_and(|row| {
+                row["step"].is_string()
+                    && row["data"]["timestamp"].is_string()
+                    && row["data"]["responsible"].is_string()
+                    && !row["data"]["output"].is_null()
+            })
+    );
+
+    let (start_status, start_body) =
+        call_json(&mut api, get("/api/start-process-1/instances")).await;
+    assert_eq!(start_status, StatusCode::OK);
+    assert!(
+        start_body["instances"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["id"] == start_instance_id))
+    );
+    assert!(start_body["instances"].is_array());
+
+    let (openapi_status, openapi_body) = call_json(&mut api, get("/api")).await;
+    assert_eq!(openapi_status, StatusCode::OK);
+
+    let exposed_instances_ref = &openapi_body["paths"]["/wait-process-1/instances"]["get"]["responses"]
+        ["200"]["content"]["application/json"]["schema"]["$ref"];
+    let exposed_instances_name = exposed_instances_ref
+        .as_str()
+        .unwrap()
+        .trim_start_matches("#/components/schemas/");
+    assert_eq!(exposed_instances_name, "ExposedInstances");
+    assert_eq!(
+        openapi_body["components"]["schemas"][exposed_instances_name]["type"],
+        "array"
+    );
+
+    let default_instances_ref = &openapi_body["paths"]["/start-process-1/instances"]["get"]["responses"]
+        ["200"]["content"]["application/json"]["schema"]["$ref"];
+    assert_eq!(default_instances_ref, "#/components/schemas/Instances");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn bpmn_xml_is_available_for_registered_processes() {
     let mut api = build_api();
 

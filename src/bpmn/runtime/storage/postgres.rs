@@ -10,7 +10,9 @@ use serde_json::Value as JsonValue;
 use crate::bpmn::{
     InstanceId, ProcessName, RegisteredProcess, Step, Steps, Token, TokenId, Value,
     messages::Entity,
-    storage::{FinishedStep, ResumableProcess, Storage, StorageBackend, StorageError},
+    storage::{
+        FinishedStep, InstanceDetails, ResumableProcess, Storage, StorageBackend, StorageError,
+    },
 };
 
 /// Errors emitted while opening or preparing PostgreSQL storage.
@@ -231,6 +233,73 @@ impl StorageBackend for Postgres {
         });
 
         Ok(rows)
+    }
+
+    fn query_all(
+        &self,
+        process: &RegisteredProcess<Self>,
+    ) -> Result<Vec<InstanceDetails>, StorageError> {
+        self.with_client(|client| {
+            let rows = client.query(
+                "
+                    WITH target_process AS (
+                        SELECT id
+                        FROM processes
+                        WHERE name = $1 AND version = $2
+                    ),
+                    latest_per_instance AS (
+                        SELECT f.instance_id, MAX(f.id) AS max_id
+                        FROM finished_steps f
+                        JOIN instances i ON i.id = f.instance_id
+                        JOIN target_process p ON p.id = i.process_id
+                        GROUP BY f.instance_id
+                    )
+                    SELECT f.instance_id, s.step_name, f.value_json, f.timestamp, e.name
+                    FROM latest_per_instance l
+                    JOIN finished_steps f ON f.id = l.max_id
+                    JOIN steps s ON s.id = f.step_id
+                    LEFT JOIN entities e ON e.id = f.entity_id
+                    ORDER BY f.id ASC
+                    ",
+                &[
+                    &process.meta_data.name.as_ref(),
+                    &i32::try_from(process.meta_data.version)
+                        .expect("process version must fit into PostgreSQL INTEGER"),
+                ],
+            )?;
+
+            Ok(rows
+                .into_iter()
+                .map(|row| {
+                    let (instance_id_raw, step_name, output, timestamp, entity_name) = (
+                        row.get::<_, String>(0),
+                        row.get::<_, String>(1),
+                        row.get::<_, JsonValue>(2),
+                        row.get::<_, chrono::DateTime<chrono::Utc>>(3),
+                        row.get::<_, Option<String>>(4),
+                    );
+
+                    let Ok(instance_id) = instance_id_raw.parse() else {
+                        // Skip rows with invalid instance IDs, which should not happen unless the database was tampered with.
+                        return None;
+                    };
+                    let Some(step) = process.steps.get(&step_name) else {
+                        // Skip rows with invalid step names, which should not happen unless the database was tampered with.
+                        return None;
+                    };
+
+                    InstanceDetails {
+                        instance_id,
+                        step,
+                        data: FinishedStep {
+                            timestamp,
+                            responsible: entity_name.map(Entity::from).unwrap_or(Entity::SYSTEM),
+                            output,
+                        },
+                    }
+                })
+                .collect())
+        })
     }
 
     fn new_instance(
@@ -867,5 +936,85 @@ mod tests {
             .expect_err("query must fail due to process mismatch");
 
         assert_eq!(error, StorageError::ProcessMismatch);
+    }
+
+    #[test]
+    fn postgres_query_all_returns_latest_state_per_instance() {
+        let Some(backend) = test_backend() else {
+            return;
+        };
+
+        let mut runtime = Runtime::new(TokioExecutor, backend.clone());
+        runtime
+            .register_process(PostgresQueryProcess)
+            .expect("first process registration must succeed");
+        runtime
+            .register_process(PostgresOtherProcess)
+            .expect("second process registration must succeed");
+
+        let process_name = ProcessName::from(PostgresQueryProcess.metadata());
+        let other_process_name = ProcessName::from(PostgresOtherProcess.metadata());
+        let registered = runtime
+            .get_registered_process(&process_name)
+            .expect("registered process must exist");
+        let other_registered = runtime
+            .get_registered_process(&other_process_name)
+            .expect("other registered process must exist");
+
+        let step = registered
+            .steps
+            .get("identity")
+            .expect("identity step must exist");
+        let other_step = other_registered
+            .steps
+            .get("identity")
+            .expect("other identity step must exist");
+
+        let instance_a: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+        let instance_b: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+        let other_instance: InstanceId = uuid::Uuid::new_v4()
+            .to_string()
+            .parse()
+            .expect("uuid must parse to instance id");
+
+        let storage_a = backend.new_instance(registered, instance_a);
+        let storage_b = backend.new_instance(registered, instance_b);
+        let other_storage = backend.new_instance(other_registered, other_instance);
+
+        let token_a = Token::new(Entity::SYSTEM, storage_a.clone());
+        let token_b = Token::new(Entity::SYSTEM, storage_b.clone());
+        let token_other = Token::new(Entity::SYSTEM, other_storage.clone());
+
+        storage_a.add(&Entity::SYSTEM, token_a.id(), step.clone(), 10_i32);
+        storage_a.add(&Entity::SYSTEM, token_a.id(), step.clone(), 20_i32);
+        storage_b.add(&Entity::SYSTEM, token_b.id(), step.clone(), 30_i32);
+        other_storage.add(&Entity::SYSTEM, token_other.id(), other_step, 99_i32);
+
+        let all = backend
+            .query_all(registered)
+            .expect("query_all must succeed");
+
+        assert_eq!(all.len(), 2);
+
+        let row_a = all
+            .iter()
+            .find(|row| row.instance_id == instance_a)
+            .expect("instance a must be present");
+        let row_b = all
+            .iter()
+            .find(|row| row.instance_id == instance_b)
+            .expect("instance b must be present");
+
+        assert_eq!(row_a.step.as_str(), step.as_str());
+        assert_eq!(row_a.data.output, serde_json::json!(20));
+        assert_eq!(row_b.step.as_str(), step.as_str());
+        assert_eq!(row_b.data.output, serde_json::json!(30));
+        assert!(all.iter().all(|row| row.instance_id != other_instance));
     }
 }

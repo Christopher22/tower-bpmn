@@ -16,14 +16,19 @@ use tower_bpmn::{
     guards::AuthorizationGuard,
 };
 
-fn instance_has_status(body: &serde_json::Value, instance_id: &str, status: &str) -> bool {
-    body["instances"].as_array().is_some_and(|instances| {
-        instances.iter().any(|instance| {
-            instance["id"].as_str() == Some(instance_id)
-                && instance["status"]
-                    .as_str()
-                    .is_some_and(|value| value.eq_ignore_ascii_case(status))
-        })
+fn instance_is_listed(body: &serde_json::Value, instance_id: &str) -> bool {
+    // Default /instances response shape.
+    if let Some(instances) = body["instances"].as_array() {
+        return instances
+            .iter()
+            .any(|instance| instance["id"].as_str() == Some(instance_id));
+    }
+
+    // Exposed /instances response shape (latest instance details rows).
+    body.as_array().is_some_and(|instances| {
+        instances
+            .iter()
+            .any(|instance| instance["instance_id"].as_str() == Some(instance_id))
     })
 }
 
@@ -197,11 +202,7 @@ async fn test_audit_trail() {
         (response.status_code(), response.json())
     };
     assert_eq!(list_status, http::StatusCode::OK);
-    assert!(instance_has_status(
-        &list_json,
-        &instance_id.to_string(),
-        "running"
-    ));
+    assert!(instance_is_listed(&list_json, &instance_id.to_string()));
 
     let generated_key_1 =
         wait_for_generated_key(&server, &instance_id, "generate_key_1", "Basic bWF4Og==").await;

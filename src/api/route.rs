@@ -924,6 +924,42 @@ pub(super) fn register_exposed_step_query_routes<
         };
 
         let process_name = ProcessName::from(&process.meta_data);
+        let process_name_for_instances_query = process_name.clone();
+        let instances_path = format!("/{process_name}/instances");
+        let instances_schema = schema_for::<Vec<crate::bpmn::storage::InstanceDetails>>();
+
+        // For exposed processes we replace GET /instances with a storage-backed
+        // instance snapshot endpoint that includes latest step details.
+        routes.add_get_json_doc(
+            &instances_path,
+            participant.clone(),
+            StatusCode::OK,
+            move |runtime, _| {
+                let registered = runtime
+                    .get_registered_process(&process_name_for_instances_query)
+                    .ok_or_else(|| Error::not_found("unknown process"))?;
+                let rows = runtime.storage_backend.query_all(registered)?;
+                serialize_json(&rows)
+            },
+            OperationDoc::new(
+                "List process instances with latest step details",
+                [],
+                None,
+                [
+                    (
+                        StatusCode::OK,
+                        ResponseDoc::new(
+                            "Process instances with latest step details",
+                            SchemaDoc::component_with_schema("ExposedInstances", instances_schema),
+                        ),
+                    ),
+                    (
+                        StatusCode::NOT_FOUND,
+                        ResponseDoc::new("Unknown process", SchemaDoc::from_component("Error")),
+                    ),
+                ],
+            ),
+        );
 
         for step_name in process.steps.steps() {
             let Some(step) = process.steps.get(step_name) else {

@@ -31,6 +31,17 @@ pub struct FinishedStep {
     pub output: JsonValue,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+/// The latest persisted state for one process instance.
+pub struct InstanceDetails {
+    /// The instance identifier.
+    pub instance_id: InstanceId,
+    /// The most recent finished step for this instance.
+    pub step: Step,
+    /// Metadata and output value for the latest finished step.
+    pub data: FinishedStep,
+}
+
 /// A type which can be used to indicate a step does not have an output.
 pub type NoOutput = ();
 
@@ -39,7 +50,7 @@ pub trait StorageBackend: 'static + Clone + Sized + Send + Sync {
     /// The type of storage used for instances.
     type Storage: Storage;
 
-    /// Query the backend for the values of the given step and instance ID, independently of the processes is currently running or already completed.
+    /// Query the backend for the values of the given step and instance ID, independently of the instance is currently running or already completed.
     /// If the step was not executed in the given instance, an empty list is returned.
     fn query(
         &self,
@@ -47,6 +58,12 @@ pub trait StorageBackend: 'static + Clone + Sized + Send + Sync {
         step: Step,
         instance_id: InstanceId,
     ) -> Result<Vec<FinishedStep>, StorageError>;
+
+    /// Query the backend for the state of all instances, independently of the instance is currently running or already completed. Only the most recent step is returned for each instance.
+    fn query_all(
+        &self,
+        process: &RegisteredProcess<Self>,
+    ) -> Result<Vec<InstanceDetails>, StorageError>;
 
     /// Register a new instance.
     fn new_instance(
@@ -93,12 +110,14 @@ pub trait Storage: 'static + std::fmt::Debug + Clone + Send + Sync + Eq {
 }
 
 /// Errors that can occur when trying to resume a paused instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageError {
     /// No instance with the given ID was found.
     NotFound,
     /// An instance with the given ID was found, but it belongs to a different process.
     ProcessMismatch,
+    /// An error occurred in the storage backend, with the provided error message.
+    BackendError(String),
 }
 
 impl std::fmt::Display for StorageError {
@@ -106,6 +125,7 @@ impl std::fmt::Display for StorageError {
         match self {
             StorageError::NotFound => write!(f, "Instance not found"),
             StorageError::ProcessMismatch => write!(f, "Instance belongs to a different process"),
+            StorageError::BackendError(msg) => write!(f, "Backend error: {}", msg),
         }
     }
 }

@@ -133,6 +133,9 @@ impl From<StorageError> for Error {
             StorageError::ProcessMismatch => {
                 Self::bad_request("instance belongs to a different process")
             }
+            StorageError::BackendError(message) => {
+                Self::bad_request(format!("storage error: {message}"))
+            }
         }
     }
 }
