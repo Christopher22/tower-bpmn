@@ -16,9 +16,7 @@ pub use dynamic::{DynamicInput, DynamicValue};
 pub use instance::{Handle, Instance, InstanceId, InstanceNotRunning, InstanceStatus};
 pub use instances::{InstanceSpawnError, Instances};
 pub use registered_process::RegisteredProcess;
-pub use token::{Token, TokenId, Value};
-
-pub(crate) use token::internal::DynValue;
+pub use token::{Token, TokenId};
 
 use storage::{StorageBackend, StorageError};
 

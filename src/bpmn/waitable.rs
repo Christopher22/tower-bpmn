@@ -4,7 +4,7 @@ use chrono::DateTime;
 use futures::FutureExt;
 
 use crate::bpmn::{
-    ExternalStepData, Process, Storage, Token, Value,
+    ExternalStepData, Extract, Process, Storage, Token, Value,
     messages::{CorrelationKey, Entity, MessageBroker, Messages, Participant},
     steps::{Step, StepsBuilder},
     storage::NoOutput,
@@ -103,6 +103,56 @@ impl<P: Process, E: Value> IncomingMessage<P, E> {
         self.4 = expected_sender;
         self
     }
+
+    fn try_receive(
+        messages: &Messages,
+        correlation_key: CorrelationKey,
+        expected_sender: &Participant,
+    ) -> Option<(Entity, E)> {
+        let (metadata, message) = messages.receive::<E>(correlation_key)?;
+        if !metadata.context.is_suitable_for(expected_sender) {
+            return None;
+        }
+
+        let responsible = metadata.context.responsible_entity()?.clone();
+        Some((responsible, message))
+    }
+
+    fn wait_for_message(
+        &self,
+        correlation_key: CorrelationKey,
+        expected_sender: Participant,
+    ) -> futures::future::BoxFuture<'static, (Entity, E)> {
+        let messages = self
+            .2
+            .clone()
+            .expect("incoming message waitable must be bound to a runtime");
+
+        if let Some((responsible, message)) =
+            Self::try_receive(&messages, correlation_key, &expected_sender)
+        {
+            return Box::pin(async move { (responsible, message) });
+        }
+
+        let mut receiver = messages.subscribe();
+        Box::pin(async move {
+            loop {
+                if let Some((responsible, message)) =
+                    Self::try_receive(&messages, correlation_key, &expected_sender)
+                {
+                    return (responsible, message);
+                }
+
+                match receiver.recv().await {
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        panic!("message channel closed before expected message arrived")
+                    }
+                }
+            }
+        })
+    }
 }
 
 impl<P: Process, E: Value> internal::Registerable for IncomingMessage<P, E> {
@@ -126,42 +176,19 @@ impl<P: Process, E: Value> Waitable<P, CorrelationKey, E> for IncomingMessage<P,
         _token: &Token<S>,
         correlation_key: CorrelationKey,
     ) -> Self::Future {
-        let messages = self
-            .2
-            .clone()
-            .expect("incoming message waitable must be bound to a runtime");
-
         let expected_sender = self.4.clone();
+        self.wait_for_message(correlation_key, expected_sender)
+    }
+}
 
-        let try_receive = move |messages: &Messages, correlation_key: CorrelationKey| {
-            let (metadata, message) = messages.receive::<E>(correlation_key)?;
-            if !metadata.context.is_suitable_for(&expected_sender) {
-                return None;
-            }
+impl<P: Process, E: Value, I: Extract<CorrelationKey> + Extract<Participant>> Waitable<P, I, E>
+    for IncomingMessage<P, E>
+{
+    type Future = futures::future::BoxFuture<'static, (Entity, E)>;
 
-            let responsible = metadata.context.responsible_entity()?.clone();
-            Some((responsible, message))
-        };
-
-        if let Some((responsible, message)) = try_receive(&messages, correlation_key) {
-            return Box::pin(async move { (responsible, message) });
-        }
-
-        let mut receiver = messages.subscribe();
-        Box::pin(async move {
-            loop {
-                if let Some((responsible, message)) = try_receive(&messages, correlation_key) {
-                    return (responsible, message);
-                }
-
-                match receiver.recv().await {
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        panic!("message channel closed before expected message arrived")
-                    }
-                }
-            }
-        })
+    fn wait_for<S: Storage>(&self, _token: &Token<S>, input: I) -> Self::Future {
+        let correlation_key = input.extract();
+        let expected_sender = input.extract();
+        self.wait_for_message(correlation_key, expected_sender)
     }
 }

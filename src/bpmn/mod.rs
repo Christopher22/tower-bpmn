@@ -6,6 +6,7 @@ mod runtime;
 pub(crate) mod steps;
 #[cfg(test)]
 mod tests;
+mod value;
 mod waitable;
 
 use std::future::Future;
@@ -18,13 +19,11 @@ pub use self::process::{InvalidProcessNameError, MetaData, Process, ProcessName}
 pub use self::process_builder::{ProcessBuilder, ProcessBuilderRef};
 pub use self::runtime::{
     DynamicValue, Handle, Instance, InstanceId, InstanceNotRunning, InstanceSpawnError,
-    InstanceStatus, Instances, ProcessError, RegisteredProcess, Runtime, Token, TokenId, Value,
-    storage,
+    InstanceStatus, Instances, ProcessError, RegisteredProcess, Runtime, Token, TokenId, storage,
 };
 pub use self::steps::{ExternalStep, ExternalStepData, Step, Steps, Type};
+pub use self::value::{Extract, Value};
 pub use self::waitable::{IncomingMessage, Timer, Waitable};
-
-pub(crate) use self::runtime::DynValue;
 
 use self::storage::Storage;
 

@@ -1,38 +1,6 @@
-use schemars::JsonSchema;
 use uuid::Uuid;
 
-use std::any::Any;
-
-use crate::bpmn::{Step, Storage, messages::Entity};
-
-pub(crate) mod internal {
-    use super::*;
-
-    /// Be default, "Value" is not a valid trait object. This basic marker is it and serve as a placeholder.
-    pub trait DynValue: 'static + std::fmt::Debug + Any + Send + Sync {
-        /// Clone the value into a boxed trait object.
-        fn clone_box(&self) -> Box<dyn DynValue>;
-    }
-
-    impl<T> DynValue for T
-    where
-        T: 'static + std::fmt::Debug + Any + Send + Sync + Clone,
-    {
-        fn clone_box(&self) -> Box<dyn DynValue> {
-            Box::new(self.clone())
-        }
-    }
-}
-/// Marker trait for values that can be stored in token history and messages.
-pub trait Value:
-    internal::DynValue + Clone + serde::Serialize + for<'a> serde::Deserialize<'a> + JsonSchema
-{
-}
-
-impl<T> Value for T where
-    T: internal::DynValue + Clone + serde::Serialize + for<'a> serde::Deserialize<'a> + JsonSchema
-{
-}
+use crate::bpmn::{Step, Storage, Value, messages::Entity};
 
 /// ID of a BPMN token, which is used for tracking token history and visibility across branches in the process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

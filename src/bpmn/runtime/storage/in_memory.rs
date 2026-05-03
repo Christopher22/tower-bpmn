@@ -8,9 +8,10 @@ use dashmap::DashMap;
 use serde_json::Value as JsonValue;
 
 use crate::bpmn::{
-    DynValue, InstanceId, ProcessName, RegisteredProcess, Step, Storage, TokenId, Value,
+    InstanceId, ProcessName, RegisteredProcess, Step, Storage, TokenId, Value,
     messages::Entity,
     storage::{FinishedStep, ResumableProcess, StorageBackend, StorageError},
+    value::internal::DynValue,
 };
 
 /// A stored value after a process finished.
