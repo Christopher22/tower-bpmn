@@ -161,10 +161,14 @@ async fn test_audit_trail() {
         .build();
 
     let app: Router = Router::new()
-        .route_service("/api/{*key}", bpnm_api.clone())
-        .route("/", get(|| async {}));
+        .nest_service("/api", bpnm_api.clone())
+        .route("/", get(|| async { "Hello, World!" }));
 
     let server = TestServer::new(app);
+
+    // Sanity check that the server is up and running and the API is accessible without authentication.
+    server.get("/").await.assert_text("Hello, World!");
+    server.get("/api/").await.assert_text_contains("openapi");
 
     assert_eq!(
         server

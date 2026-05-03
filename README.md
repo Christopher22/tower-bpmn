@@ -78,9 +78,9 @@ runtime.register_process(OrderProcess).unwrap();
 
 let api = Api::new("api", runtime);
 let app = Router::new()
-    .route_service("/api/{*key}", api);
+    .nest_service("/api", api);
 
-// Start server and visit http://localhost:3000/api/openapi
+// Start server and visit http://localhost:3000/api/
 ```
 
 ## Contributing
