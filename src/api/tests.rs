@@ -251,7 +251,7 @@ async fn openapi_is_available_at_root_and_entrypoint() {
     let (status_entry, body_entry) = call_json(&mut api, get("/api/")).await;
     assert_eq!(status_entry, StatusCode::OK);
     assert_eq!(body_entry["info"]["title"], "tower-bpmn API");
-    assert!(body_entry["paths"]["/processes"].is_object());
+    assert!(body_entry["paths"]["/start-process-1"].is_object());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -259,26 +259,26 @@ async fn openapi_lists_process_paths_and_raw_input_schemas() {
     let mut api = build_api();
     let (_, body) = call_json(&mut api, get("/api")).await;
 
-    assert!(body["paths"]["/processes/start-process-1"].is_object());
-    assert!(body["paths"]["/processes/start-process-1/instances"].is_object());
-    assert!(body["paths"]["/processes/wait-process-1"].is_object());
+    assert!(body["paths"]["/start-process-1"].is_object());
+    assert!(body["paths"]["/start-process-1/instances"].is_object());
+    assert!(body["paths"]["/wait-process-1"].is_object());
 
-    let start_schema = &body["paths"]["/processes/start-process-1"]["post"]["requestBody"]["content"]
+    let start_schema = &body["paths"]["/start-process-1/instances"]["post"]["requestBody"]["content"]
         ["application/json"]["schema"];
     assert_eq!(start_schema["type"], "integer");
 
-    let wait_schema = &body["paths"]["/processes/wait-process-1"]["post"]["requestBody"]["content"]
+    let wait_schema = &body["paths"]["/wait-process-1/instances"]["post"]["requestBody"]["content"]
         ["application/json"]["schema"];
     assert_eq!(wait_schema["type"], "string");
     assert_eq!(wait_schema["format"], "uuid");
 
-    let waiting_message_schema = &body["paths"]["/processes/wait-process-1/steps/incoming/{correlation_key}"]
-        ["post"]["requestBody"]["content"]["application/json"]["schema"];
+    let waiting_message_schema = &body["paths"]["/wait-process-1/step/incoming/{id}"]["post"]["requestBody"]
+        ["content"]["application/json"]["schema"];
     assert_eq!(waiting_message_schema["type"], "integer");
 
-    let waiting_message_parameter = &body["paths"]["/processes/wait-process-1/steps/incoming/{correlation_key}"]
-        ["post"]["parameters"][0];
-    assert_eq!(waiting_message_parameter["name"], "correlation_key");
+    let waiting_message_parameter =
+        &body["paths"]["/wait-process-1/step/incoming/{id}"]["post"]["parameters"][0];
+    assert_eq!(waiting_message_parameter["name"], "id");
     assert_eq!(waiting_message_parameter["in"], "path");
     assert_eq!(waiting_message_parameter["required"], true);
     assert_eq!(
@@ -301,86 +301,59 @@ async fn openapi_exposes_expected_component_schemas() {
     let (_, body) = call_json(&mut api, get("/")).await;
 
     assert!(body["components"]["schemas"]["Error"].is_object());
-    assert!(body["components"]["schemas"]["ProcessesResponse"].is_object());
     assert!(body["components"]["schemas"]["ProcessSummary"].is_object());
     assert!(body["components"]["schemas"]["StartedInstanceResponse"].is_object());
     assert!(body["components"]["schemas"]["Instances"].is_object());
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn lists_registered_processes_with_metadata_steps_and_input_schema() {
+async fn process_metadata_is_available() {
     let mut api = build_api();
-    let (status, body) = call_json(&mut api, get("/api/processes")).await;
+    let (status, body) = call_json(&mut api, get("/api/start-process-1")).await;
 
     assert_eq!(status, StatusCode::OK);
-    let processes = body["processes"].as_array().unwrap();
-    let start = processes
-        .iter()
-        .find(|process| process["name"] == "start-process-1")
-        .unwrap();
-
-    assert_eq!(start["metadata"]["name"], "start-process");
-    assert_eq!(start["metadata"]["version"], 1);
-    assert_eq!(start["input_schema"]["type"], "integer");
+    assert_eq!(body["name"], "start-process-1");
+    assert_eq!(body["metadata"]["name"], "start-process");
+    assert_eq!(body["metadata"]["version"], 1);
+    assert_eq!(body["input_schema"]["type"], "integer");
     assert!(
-        start["steps"]
+        body["steps"]
             .as_array()
             .is_some_and(|steps| steps.iter().any(|step| step == "identity"))
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn process_instance_routes_start_instances_on_both_aliases() {
+async fn process_instance_routes_start_instances() {
     let mut api = build_api();
 
-    let (status_direct, body_direct) = call_json(
+    let (status, body) = call_json(
         &mut api,
-        post("/processes/start-process-1", serde_json::json!(12)),
+        post("/api/start-process-1/instances", serde_json::json!(12)),
     )
     .await;
-    assert_eq!(status_direct, StatusCode::ACCEPTED);
-    assert!(body_direct["id"].is_string());
-    assert_eq!(body_direct["status"], "running");
-
-    let (status_instances, body_instances) = call_json(
-        &mut api,
-        post(
-            "/processes/start-process-1/instances",
-            serde_json::json!(21),
-        ),
-    )
-    .await;
-    assert_eq!(status_instances, StatusCode::ACCEPTED);
-    assert!(body_instances["id"].is_string());
-    assert_eq!(body_instances["status"], "running");
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(body["id"].is_string());
+    assert_eq!(body["status"], "running");
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn process_instance_routes_list_running_instances_on_both_aliases() {
+async fn process_instance_routes_list_running_instances() {
     let mut api = build_api();
     let correlation_key = CorrelationKey::new();
     let (_, started) = call_json(
         &mut api,
         post(
-            "/api/processes/wait-process-1/instances",
+            "/api/wait-process-1/instances",
             serde_json::to_value(correlation_key).unwrap(),
         ),
     )
     .await;
     let instance_id = started["id"].as_str().unwrap().to_string();
 
-    let (status_direct, direct_body) = call_json(&mut api, get("/processes/wait-process-1")).await;
-    assert_eq!(status_direct, StatusCode::OK);
-    assert!(instance_has_status(&direct_body, &instance_id, "running"));
-
-    let (status_instances, instances_body) =
-        call_json(&mut api, get("/processes/wait-process-1/instances")).await;
-    assert_eq!(status_instances, StatusCode::OK);
-    assert!(instance_has_status(
-        &instances_body,
-        &instance_id,
-        "running"
-    ));
+    let (status, body) = call_json(&mut api, get("/api/wait-process-1/instances")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(instance_has_status(&body, &instance_id, "running"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -391,13 +364,13 @@ async fn external_step_endpoint_sends_message_to_waiting_process() {
     let _ = call_json(
         &mut api,
         post(
-            "/api/processes/wait-process-1/instances",
+            "/api/wait-process-1/instances",
             serde_json::to_value(correlation_key).unwrap(),
         ),
     )
     .await;
 
-    let message_path = format!("/api/processes/wait-process-1/steps/incoming/{correlation_key}");
+    let message_path = format!("/api/wait-process-1/step/incoming/{correlation_key}");
     let (message_status, message_body) =
         call_json(&mut api, post(&message_path, serde_json::json!(21))).await;
     assert_eq!(message_status, StatusCode::ACCEPTED);
@@ -415,7 +388,7 @@ async fn external_step_endpoint_sends_message_to_waiting_process() {
 #[tokio::test(flavor = "current_thread")]
 async fn returns_empty_instance_list_before_any_start() {
     let mut api = build_api();
-    let (status, body) = call_json(&mut api, get("/processes/start-process-1/instances")).await;
+    let (status, body) = call_json(&mut api, get("/api/start-process-1/instances")).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["instances"].as_array().unwrap().len(), 0);
@@ -426,7 +399,7 @@ async fn rejects_invalid_json_body_syntax() {
     let mut api = build_api();
     let (status, body) = call_json(
         &mut api,
-        post_raw("/processes/start-process-1/instances", "{\"broken\":"),
+        post_raw("/api/start-process-1/instances", "{\"broken\":"),
     )
     .await;
 
@@ -445,7 +418,7 @@ async fn rejects_payloads_that_do_not_match_process_input_schema() {
     let (status, body) = call_json(
         &mut api,
         post(
-            "/processes/start-process-1/instances",
+            "/api/start-process-1/instances",
             serde_json::json!("not-an-integer"),
         ),
     )
@@ -471,7 +444,7 @@ async fn unknown_routes_and_processes_return_not_found() {
     assert_eq!(body_unknown_route["message"], "route not found");
 
     let (status_unknown_process, body_unknown_process) =
-        call_json(&mut api, get("/processes/unknown-process-1/instances")).await;
+        call_json(&mut api, get("/api/unknown-process-1/instances")).await;
     assert_eq!(status_unknown_process, StatusCode::NOT_FOUND);
     assert_eq!(body_unknown_process["message"], "route not found");
 }
@@ -482,7 +455,7 @@ async fn unsupported_methods_return_method_not_allowed() {
 
     let request = Request::builder()
         .method(Method::POST)
-        .uri("/processes")
+        .uri("/api/start-process-1")
         .body(Full::new(bytes::Bytes::from("1")))
         .unwrap();
     let (status_post, body_post) = call_json(&mut api, request).await;
@@ -491,7 +464,7 @@ async fn unsupported_methods_return_method_not_allowed() {
 
     let request = Request::builder()
         .method(Method::PUT)
-        .uri("/processes/start-process-1")
+        .uri("/api/start-process-1/instances")
         .body(Full::new(bytes::Bytes::new()))
         .unwrap();
     let (status_put, body_put) = call_json(&mut api, request).await;
@@ -503,11 +476,7 @@ async fn unsupported_methods_return_method_not_allowed() {
 async fn trailing_slashes_are_accepted() {
     let mut api = build_api();
 
-    let (status_processes, _) = call_json(&mut api, get("/api/processes/")).await;
-    assert_eq!(status_processes, StatusCode::OK);
-
-    let (status_instances, _) =
-        call_json(&mut api, get("/api/processes/start-process-1/instances/")).await;
+    let (status_instances, _) = call_json(&mut api, get("/api/start-process-1/instances/")).await;
     assert_eq!(status_instances, StatusCode::OK);
 }
 
@@ -545,7 +514,7 @@ async fn guard_context_is_used_for_process_start() {
     let mut blocked = build_restricted_api(crate::guards::EverybodyGuard);
     let (blocked_status, blocked_body) = call_json(
         &mut blocked,
-        post("/api/processes/restricted-process-1/instances", 7.into()),
+        post("/api/restricted-process-1/instances", 7.into()),
     )
     .await;
     assert_eq!(blocked_status, StatusCode::FORBIDDEN);
@@ -558,7 +527,7 @@ async fn guard_context_is_used_for_process_start() {
     let mut allowed = build_restricted_api(RoleGuard);
     let (allowed_status, allowed_body) = call_json(
         &mut allowed,
-        post("/api/processes/restricted-process-1/instances", 7.into()),
+        post("/api/restricted-process-1/instances", 7.into()),
     )
     .await;
     assert_eq!(allowed_status, StatusCode::ACCEPTED);
@@ -587,15 +556,12 @@ async fn step_query_for_non_exposed_process_is_not_available() {
 
     let (_, started) = call_json(
         &mut api,
-        post(
-            "/api/processes/start-process-1/instances",
-            serde_json::json!(7),
-        ),
+        post("/api/start-process-1/instances", serde_json::json!(7)),
     )
     .await;
     let instance_id = started["id"].as_str().unwrap();
 
-    let path = format!("/api/processes/start-process-1/steps/identity/history/{instance_id}");
+    let path = format!("/api/start-process-1/step/identity/{instance_id}");
     let (status, body) = call_json(&mut api, get(&path)).await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -613,14 +579,14 @@ async fn step_query_requires_suitable_context() {
     let (_, started) = call_json(
         &mut api,
         post(
-            "/api/processes/wait-process-1/instances",
+            "/api/wait-process-1/instances",
             serde_json::to_value(correlation_key).unwrap(),
         ),
     )
     .await;
     let instance_id = started["id"].as_str().unwrap();
 
-    let path = format!("/api/processes/wait-process-1/steps/Start/history/{instance_id}");
+    let path = format!("/api/wait-process-1/step/Start/{instance_id}");
     let (status, body) = call_json(&mut api, get(&path)).await;
 
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -636,19 +602,18 @@ async fn step_query_returns_correct_history_for_external_and_normal_steps() {
     let (_, started) = call_json(
         &mut api,
         post(
-            "/api/processes/wait-process-1/instances",
+            "/api/wait-process-1/instances",
             serde_json::to_value(correlation_key).unwrap(),
         ),
     )
     .await;
     let instance_id = started["id"].as_str().unwrap().to_string();
 
-    let message_path = format!("/api/processes/wait-process-1/steps/incoming/{correlation_key}");
+    let message_path = format!("/api/wait-process-1/step/incoming/{correlation_key}");
     let (message_status, _) = call_json(&mut api, post(&message_path, serde_json::json!(21))).await;
     assert_eq!(message_status, StatusCode::ACCEPTED);
 
-    let incoming_history_path =
-        format!("/api/processes/wait-process-1/steps/incoming/history/{instance_id}");
+    let incoming_history_path = format!("/api/wait-process-1/step/incoming/{instance_id}");
     let mut incoming_rows = Vec::new();
     for _ in 0..20 {
         let (incoming_status, incoming_body) =
@@ -666,8 +631,7 @@ async fn step_query_returns_correct_history_for_external_and_normal_steps() {
     assert!(incoming_rows[0]["timestamp"].is_string());
     assert!(incoming_rows[0]["responsible"].is_string());
 
-    let normal_history_path =
-        format!("/api/processes/wait-process-1/steps/double/history/{instance_id}");
+    let normal_history_path = format!("/api/wait-process-1/step/double/{instance_id}");
     let mut normal_rows = Vec::new();
     for _ in 0..20 {
         let (normal_status, normal_body) = call_json(&mut api, get(&normal_history_path)).await;
@@ -692,20 +656,12 @@ async fn openapi_includes_exposed_step_query_paths_and_custom_output_value_schem
 
     let (_, body) = call_json(&mut api, get("/api")).await;
 
-    assert!(
-        body["paths"]["/processes/wait-process-1/steps/incoming/history/{instance_id}"]["get"]
-            .is_object()
-    );
-    assert!(
-        body["paths"]["/processes/wait-process-1/steps/double/history/{instance_id}"]["get"]
-            .is_object()
-    );
-    assert!(
-        body["paths"]["/processes/start-process-1/steps/identity/history/{instance_id}"].is_null()
-    );
+    assert!(body["paths"]["/wait-process-1/step/incoming/{id}"]["get"].is_object());
+    assert!(body["paths"]["/wait-process-1/step/double/{id}"]["get"].is_object());
+    assert!(body["paths"]["/start-process-1/step/identity/{id}"].is_null());
 
-    let incoming_schema_ref = &body["paths"]["/processes/wait-process-1/steps/incoming/history/{instance_id}"]
-        ["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"];
+    let incoming_schema_ref = &body["paths"]["/wait-process-1/step/incoming/{id}"]["get"]["responses"]
+        ["200"]["content"]["application/json"]["schema"]["$ref"];
     let incoming_schema_name = incoming_schema_ref
         .as_str()
         .unwrap()
@@ -715,8 +671,8 @@ async fn openapi_includes_exposed_step_query_paths_and_custom_output_value_schem
     assert_eq!(incoming_output["type"], "integer");
     assert!(incoming_schema["items"]["properties"]["output"].is_null());
 
-    let double_schema_ref = &body["paths"]["/processes/wait-process-1/steps/double/history/{instance_id}"]
-        ["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"];
+    let double_schema_ref = &body["paths"]["/wait-process-1/step/double/{id}"]["get"]["responses"]
+        ["200"]["content"]["application/json"]["schema"]["$ref"];
     let double_schema_name = double_schema_ref
         .as_str()
         .unwrap()
@@ -730,7 +686,7 @@ async fn openapi_includes_exposed_step_query_paths_and_custom_output_value_schem
 async fn bpmn_xml_is_available_for_registered_processes() {
     let mut api = build_api();
 
-    let request = get("/api/processes/start-process-1/bpmn");
+    let request = get("/api/start-process-1/bpmn");
     let response = Service::call(&mut api, request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);

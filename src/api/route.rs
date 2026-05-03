@@ -705,21 +705,6 @@ impl<E: ExtendedExecutor<B::Storage>, B: StorageBackend> RouteBuilder<E, B> {
             .set_post_json(status, callback, participant, None);
     }
 
-    /// Registers a documented typed GET endpoint used for automatic OpenAPI generation.
-    pub(super) fn add_get_typed_doc<O, F>(
-        &mut self,
-        path: &str,
-        participant: Participant,
-        callback: F,
-        doc: OperationDoc,
-    ) where
-        O: Serialize,
-        F: Fn(&Runtime<E, B>, &Context) -> Result<O, Error> + Send + Sync + 'static,
-    {
-        let node = self.route_mut(path);
-        node.methods.set_get_typed(callback, participant, Some(doc));
-    }
-
     /// Registers a documented JSON GET endpoint used for automatic OpenAPI generation.
     pub(super) fn add_get_json_doc<F>(
         &mut self,
@@ -837,55 +822,48 @@ pub(super) fn register_runtime_routes<E: ExtendedExecutor<B::Storage>, B: Storag
     routes: &mut RouteBuilder<E, B>,
     runtime: &Runtime<E, B>,
 ) {
-    routes.add_get_typed_doc(
-        "/processes",
-        Participant::Everyone,
-        |engine, _| {
-            Ok(ProcessesResponse {
-                processes: collect_process_summaries(engine),
-            })
-        },
-        OperationDoc::new(
-            "List registered processes",
-            [],
-            None,
-            [(
-                StatusCode::OK,
-                ResponseDoc::new(
-                    "Registered processes",
-                    SchemaDoc::component::<ProcessesResponse>("ProcessesResponse"),
-                ),
-            )],
-        ),
-    );
-
     for process in runtime.registered_processes() {
         let process_name = ProcessName::from(&process.meta_data);
         let start_type = process.steps.start();
-        register_process_instance_routes(
-            routes,
-            process_name.clone(),
-            start_type.as_ref().expected_participant.clone(),
-            start_type.as_ref().input.schema.as_value(),
+        let input_schema = start_type.as_ref().input.schema.as_value();
+        let participant = start_type.as_ref().expected_participant.clone();
+
+        // Register process metadata endpoint: GET /{process}/
+        let process_name_meta = process_name.clone();
+        routes.add_get_json_doc(
+            &format!("/{process_name}"),
+            participant.clone(),
+            StatusCode::OK,
+            move |runtime, _| {
+                let registered = runtime
+                    .get_registered_process(&process_name_meta)
+                    .ok_or_else(|| Error::not_found("unknown process"))?;
+                serialize_json(&ProcessSummary::from_registered(registered))
+            },
+            OperationDoc::new(
+                "Get process metadata",
+                [],
+                None,
+                [
+                    (
+                        StatusCode::OK,
+                        ResponseDoc::new(
+                            "Process metadata",
+                            SchemaDoc::component::<ProcessSummary>("ProcessSummary"),
+                        ),
+                    ),
+                    (
+                        StatusCode::NOT_FOUND,
+                        ResponseDoc::new("Unknown process", SchemaDoc::component::<Error>("Error")),
+                    ),
+                ],
+            ),
         );
 
-        for external_step in process.steps.external_steps() {
-            let Some(step) = process.steps.get(external_step.name.as_str()) else {
-                continue;
-            };
-            register_external_step_message_route(
-                routes,
-                process_name.clone(),
-                step,
-                external_step.expected_participant.clone(),
-                external_step.input.schema.as_value(),
-            );
-        }
-
-        let bpmn_path = format!("/processes/{process_name}/bpmn");
+        // Register BPMN endpoint: GET /{process}/bpmn
         let process_name_bpmn = process_name.clone();
         routes.add_get_xml_doc(
-            &bpmn_path,
+            &format!("/{process_name}/bpmn"),
             Participant::Everyone,
             move |runtime, _| {
                 let registered = runtime
@@ -906,6 +884,28 @@ pub(super) fn register_runtime_routes<E: ExtendedExecutor<B::Storage>, B: Storag
                 )],
             ),
         );
+
+        // Register instances endpoints: GET/POST /{process}/instances/
+        register_process_instance_routes(
+            routes,
+            process_name.clone(),
+            participant.clone(),
+            input_schema,
+        );
+
+        // Register external step message routes
+        for external_step in process.steps.external_steps() {
+            let Some(step) = process.steps.get(external_step.name.as_str()) else {
+                continue;
+            };
+            register_external_step_message_route(
+                routes,
+                process_name.clone(),
+                step,
+                external_step.expected_participant.clone(),
+                external_step.input.schema.as_value(),
+            );
+        }
     }
 }
 
@@ -938,11 +938,11 @@ pub(super) fn register_exposed_step_query_routes<
             let output_schema = step.output().schema.as_value().clone();
             let response_schema = finished_steps_schema_for_output(&output_schema);
 
-            let history_base_path = format!("/processes/{process_name}/steps/{step_name}/history");
+            let history_path = format!("/{process_name}/step/{step_name}");
             let step_for_query = step.clone();
             let process_name_for_query = process_name.clone();
             routes.add_get_json_doc_with_path_segment(
-                &history_base_path,
+                &history_path,
                 participant.clone(),
                 StatusCode::OK,
                 move |runtime, instance_id, _| {
@@ -964,7 +964,7 @@ pub(super) fn register_exposed_step_query_routes<
                 OperationDoc::new(
                     "List finished step entries for one process instance",
                     [ParameterDoc::path(
-                        "instance_id",
+                        "id",
                         "Process instance id",
                         SchemaDoc::component::<InstanceId>("InstanceId"),
                     )],
@@ -1067,82 +1067,78 @@ fn register_process_instance_routes<E: ExtendedExecutor<B::Storage>, B: StorageB
     participant: Participant,
     input_schema: &serde_json::Value,
 ) {
-    let direct_path = format!("/processes/{process_name}");
-    let instances_path = format!("/processes/{process_name}/instances");
+    let instances_path = format!("/{process_name}/instances");
 
-    for path in [&direct_path, &instances_path] {
-        let process_name_get = process_name.clone();
-        routes.add_get_json_doc(
-            path,
-            participant.clone(),
-            StatusCode::OK,
-            move |runtime, _| {
-                let instances = runtime
-                    .get_instances(&process_name_get)
-                    .ok_or_else(|| Error::not_found("unknown process"))?;
-                serialize_json(instances)
-            },
-            OperationDoc::new(
-                "List process instances",
-                [],
-                None,
-                [
-                    (
-                        StatusCode::OK,
-                        ResponseDoc::new(
-                            "Process instances",
-                            SchemaDoc::component::<Instances<E, B>>("Instances"),
-                        ),
+    // GET /{process}/instances/ - List instances
+    let process_name_get = process_name.clone();
+    routes.add_get_json_doc(
+        &instances_path,
+        participant.clone(),
+        StatusCode::OK,
+        move |runtime, _| {
+            let instances = runtime
+                .get_instances(&process_name_get)
+                .ok_or_else(|| Error::not_found("unknown process"))?;
+            serialize_json(instances)
+        },
+        OperationDoc::new(
+            "List process instances",
+            [],
+            None,
+            [
+                (
+                    StatusCode::OK,
+                    ResponseDoc::new(
+                        "Process instances",
+                        SchemaDoc::component::<Instances<E, B>>("Instances"),
                     ),
-                    (
-                        StatusCode::NOT_FOUND,
-                        ResponseDoc::new("Unknown process", SchemaDoc::component::<Error>("Error")),
-                    ),
-                ],
-            ),
-        );
+                ),
+                (
+                    StatusCode::NOT_FOUND,
+                    ResponseDoc::new("Unknown process", SchemaDoc::component::<Error>("Error")),
+                ),
+            ],
+        ),
+    );
 
-        let process_name_post = process_name.clone();
-        let schema = input_schema.clone();
-        routes.add_post_json_doc(
-            path,
-            participant.clone(),
-            StatusCode::ACCEPTED,
-            move |runtime, input, context| {
-                let instance_id = runtime.run_dynamic_with_context(
-                    process_name_post.clone(),
-                    input,
-                    context.clone(),
-                )?;
-                serialize_json(&StartedInstanceResponse::new(instance_id))
-            },
-            OperationDoc::new(
-                "Start process instance",
-                [],
-                // The process input schema is attached at route registration time.
-                Some(SchemaDoc::inline(schema)),
-                [
-                    (
-                        StatusCode::ACCEPTED,
-                        ResponseDoc::new(
-                            "Started instance",
-                            SchemaDoc::component::<StartedInstanceResponse>(
-                                "StartedInstanceResponse",
-                            ),
-                        ),
+    // POST /{process}/instances/ - Create instance
+    let process_name_post = process_name.clone();
+    let schema = input_schema.clone();
+    routes.add_post_json_doc(
+        &instances_path,
+        participant,
+        StatusCode::ACCEPTED,
+        move |runtime, input, context| {
+            let instance_id = runtime.run_dynamic_with_context(
+                process_name_post.clone(),
+                input,
+                context.clone(),
+            )?;
+            serialize_json(&StartedInstanceResponse::new(instance_id))
+        },
+        OperationDoc::new(
+            "Start process instance",
+            [],
+            Some(SchemaDoc::inline(schema)),
+            [
+                (
+                    StatusCode::ACCEPTED,
+                    ResponseDoc::new(
+                        "Started instance",
+                        SchemaDoc::component::<StartedInstanceResponse>("StartedInstanceResponse"),
                     ),
-                    (
-                        StatusCode::BAD_REQUEST,
-                        ResponseDoc::new("Invalid request", SchemaDoc::from_component("Error")),
-                    ),
-                    (
-                        StatusCode::NOT_FOUND,
-                        ResponseDoc::new("Unknown process", SchemaDoc::from_component("Error")),
-                    ),
-                ],
-            ),
-        );
-    }
+                ),
+                (
+                    StatusCode::BAD_REQUEST,
+                    ResponseDoc::new("Invalid request", SchemaDoc::from_component("Error")),
+                ),
+                (
+                    StatusCode::NOT_FOUND,
+                    ResponseDoc::new("Unknown process", SchemaDoc::from_component("Error")),
+                ),
+            ],
+        ),
+    );
 }
 
 fn register_external_step_message_route<E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
@@ -1153,15 +1149,15 @@ fn register_external_step_message_route<E: ExtendedExecutor<B::Storage>, B: Stor
     input_schema: &serde_json::Value,
 ) {
     let step_name = step.as_str().to_string();
-    let base_path = format!("/processes/{process_name}/steps/{step_name}");
+    let base_path = format!("/{process_name}/step/{step_name}");
     let schema = input_schema.clone();
 
     routes.add_post_json_doc_with_path_segment(
         &base_path,
         participant,
         StatusCode::ACCEPTED,
-        move |runtime, correlation_key, payload, context| {
-            let correlation_key: CorrelationKey = correlation_key.parse()?;
+        move |runtime, id, payload, context| {
+            let correlation_key: CorrelationKey = id.parse()?;
             let mut delivered = false;
 
             for target_process in std::iter::once(process_name.clone()).chain(
@@ -1197,7 +1193,7 @@ fn register_external_step_message_route<E: ExtendedExecutor<B::Storage>, B: Stor
         OperationDoc::new(
             "Send message to waiting step",
             [ParameterDoc::path(
-                "correlation_key",
+                "id",
                 "Correlation key used to match a waiting process instance",
                 SchemaDoc::component::<CorrelationKey>("CorrelationKey"),
             )],
@@ -1298,17 +1294,6 @@ fn schema_ref(schema_name: &str) -> serde_json::Value {
     serde_json::json!({ "$ref": format!("#/components/schemas/{schema_name}") })
 }
 
-fn collect_process_summaries<E: ExtendedExecutor<B::Storage>, B: StorageBackend>(
-    runtime: &Runtime<E, B>,
-) -> Vec<ProcessSummary> {
-    let mut processes: Vec<_> = runtime
-        .registered_processes()
-        .map(ProcessSummary::from_registered)
-        .collect();
-    processes.sort_unstable_by(|left, right| left.name.to_string().cmp(&right.name.to_string()));
-    processes
-}
-
 fn split_path(path: &str) -> Vec<&str> {
     path.trim_matches('/')
         .split('/')
@@ -1348,10 +1333,6 @@ fn register_shared_components<E: ExtendedExecutor<B::Storage>, B: StorageBackend
     components: &mut BTreeMap<String, serde_json::Value>,
 ) {
     components.insert("Error".to_string(), schema_for::<Error>());
-    components.insert(
-        "ProcessesResponse".to_string(),
-        schema_for::<ProcessesResponse>(),
-    );
     components.insert("ProcessSummary".to_string(), schema_for::<ProcessSummary>());
     components.insert(
         "StartedInstanceResponse".to_string(),
@@ -1359,12 +1340,6 @@ fn register_shared_components<E: ExtendedExecutor<B::Storage>, B: StorageBackend
     );
     components.insert("Instances".to_string(), schema_for::<Instances<E, B>>());
     components.insert("Instance".to_string(), schema_for::<Instance<E, B>>());
-}
-
-/// Response body for the process collection endpoint.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub(super) struct ProcessesResponse {
-    pub(super) processes: Vec<ProcessSummary>,
 }
 
 /// Summary representation for one registered process in API responses.

@@ -33,7 +33,7 @@ async fn wait_for_generated_key(
     step_name: &str,
     auth_header: &str,
 ) -> CorrelationKey {
-    let path = format!("/api/processes/example-process-1/steps/{step_name}/history/{instance_id}");
+    let path = format!("/api/example-process-1/step/{step_name}/{instance_id}");
 
     let mut last_body = serde_json::json!([]);
     for _ in 0..100 {
@@ -172,7 +172,7 @@ async fn test_audit_trail() {
 
     assert_eq!(
         server
-            .post("/api/processes/example-process-1/instances")
+            .post("/api/example-process-1/instances")
             .json(&11)
             .await
             .status_code(),
@@ -180,7 +180,7 @@ async fn test_audit_trail() {
     );
 
     let start_response = server
-        .post("/api/processes/example-process-1/instances")
+        .post("/api/example-process-1/instances")
         .add_header(http::header::AUTHORIZATION, "Basic bWF4Og==")
         .json(&60)
         .await;
@@ -191,7 +191,7 @@ async fn test_audit_trail() {
 
     let (list_status, list_json): (http::StatusCode, serde_json::Value) = {
         let response = server
-            .get("/api/processes/example-process-1/instances")
+            .get("/api/example-process-1/instances")
             .add_header(http::header::AUTHORIZATION, "Basic bWF4Og==")
             .await;
         (response.status_code(), response.json())
@@ -212,7 +212,7 @@ async fn test_audit_trail() {
     assert_eq!(
         server
             .post(&format!(
-                "/api/processes/example-process-1/steps/add_1/{generated_key_1}"
+                "/api/example-process-1/step/add_1/{generated_key_1}"
             ))
             .add_header(http::header::AUTHORIZATION, "Basic bWF4Og==")
             .json(&3)
@@ -223,7 +223,7 @@ async fn test_audit_trail() {
     assert_eq!(
         server
             .post(&format!(
-                "/api/processes/example-process-1/steps/add_2/{generated_key_2}"
+                "/api/example-process-1/step/add_2/{generated_key_2}"
             ))
             .add_header(http::header::AUTHORIZATION, "Basic bW9yaXR6Og==")
             .json(&4)
@@ -264,16 +264,6 @@ async fn test_audit_trail() {
         "exactly 11 steps should be recorded in the history"
     );
 
-    /*
-    panic!(
-        "{}",
-        history
-            .iter()
-            .map(|entry| entry.place.as_str().to_string())
-            .collect::<Vec<String>>()
-            .join(", ")
-    );*/
-
     let runtime = bpnm_api.runtime();
     let process = runtime
         .registered_processes()
@@ -306,16 +296,6 @@ async fn test_audit_trail() {
         (),
         Entity::SYSTEM.as_ref(),
     );
-
-    /*
-    check_step(
-        &storage_backend,
-        process,
-        instance_id,
-        "addition splitter",
-        (),
-        Entity::SYSTEM.as_ref(),
-    ); */
 
     check_step(
         &storage_backend,
